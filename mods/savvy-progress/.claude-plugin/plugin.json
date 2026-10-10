@@ -1,0 +1,26 @@
+{
+  "name": "savvy-progress",
+  "version": "1.2.0-fork.2",
+  "description": "Fork of johnnyvizz/claude-kit savvy-progress 1.2.0: the /savvy-flow bar and /agents-info panel, plus omd-lite runs this session launched (mcode / claude -p / pi) with a pixel MiniMax.",
+  "author": {
+    "name": "johnnyvizz (original); claude-lead-harness contributors (omd-lite fork)"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Panel language",
+      "description": "auto follows Claude Code's language setting, then the system locale",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "ru",
+        "zh"
+      ]
+    }
+  },
+  "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
+  "repository": "https://github.com/johnnyvizz/claude-kit",
+  "license": "MIT"
+}

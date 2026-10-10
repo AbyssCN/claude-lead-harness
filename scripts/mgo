@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# mgo — 用一份 goal 文件起一个无人值守的 mcode 会话(tmux + vt),手机 VibeTunnel 可看可插话。
+#
+# 用法:
+#   mgo <goal.md> [-d 仓库目录] [-n 会话名] [-- mcode 额外参数...]   起会话并发 /goal
+#   mgo ls                                                           列出 mgo 起的会话和 goal 状态
+#   mgo after <前一个会话> <goal.md> [同上参数]                       前一个 goal 完成后自动起下一个
+#
+# 分工:Claude 白天/额度够时把计划写成 goal 文件 → 睡前 mgo 起会话 → mcode 通宵跑 → 白天 Claude 只读报告验收。
+# goal 文件里至少写清:规矩(绝对不做)· 要做什么 · 完成标准 · 报告写到哪(固定路径,白天只读这一个文件)。
+# 会话名默认 mg-<goal 文件名>;桌面接入 `tmux -L mgo a -t <会话名>`;手机打开 $MGO_VT_URL(VibeTunnel 网页)。
+# 用独立 tmux 服务(-L mgo)并放进自己的 systemd scope:默认 tmux 若是从某个 systemd 服务(比如跑 Claude 的服务)里起的,
+# 会挂在那个服务的 cgroup 下,服务一重启就连同 mcode 一起被杀。
+# 环境变量:MGO_VT_URL(手机访问 VibeTunnel 的地址,默认 http://localhost:4020,通常换成你的 Tailscale / 局域网地址)
+#           MGO_VT_UNIT(VibeTunnel 的 systemd --user 单元名,默认 vibetunnel;设为空则不自动拉起)
+#           MGO_LOG(日志,默认 ~/.local/state/mgo.log)
+set -euo pipefail
+T="tmux -L mgo"
+VT_URL="${MGO_VT_URL:-http://localhost:4020}"
+VT_UNIT="${MGO_VT_UNIT-vibetunnel}"
+LOG="${MGO_LOG:-$HOME/.local/state/mgo.log}"
+
+if [ "${1:-}" = "ls" ]; then
+  $T ls -F '#{session_name}' 2>/dev/null | grep '^mg-' | while read -r s; do
+    # 运行中「Goal · Active · 2min active」,结束「Goal complete · 1min34s · 21K tokens · 1 turns」
+    st=$($T capture-pane -pt "$s" -S -300 | grep -oE 'Goal( ·)? [A-Za-z_]+ · [^│]*[^│ ]' | tail -1 || true)
+    printf '%-28s %-52s %s\n' "$s" "${st:-(没看到 goal 状态)}" "$($T display -pt "$s" '#{pane_current_path}')"
+  done
+  exit 0
+fi
+
+# mgo after <前一个会话> <goal.md> [同上参数]:前一个会话的 goal 完成、且没有 omd-lite run 在跑时,自动起下一个。
+# 等待放在独立的 systemd 单元里(不占 Claude 额度,Claude 会话断了也照样等),最多等 12 小时。
+if [ "${1:-}" = "after" ]; then
+  shift; unit="mgo-after-$1"
+  systemd-run --user --quiet --collect --unit="$unit" --setenv=PATH="$PATH" --setenv=HOME="$HOME" ${MGO_VT_URL:+--setenv=MGO_VT_URL="$MGO_VT_URL"} ${MGO_LOG:+--setenv=MGO_LOG="$MGO_LOG"} "$(realpath "$0")" __wait "$@"
+  echo "✓ 已挂 $unit:$1 的 goal 完成且没有 omd-lite run 在跑 → 自动执行 mgo ${*:2}"
+  echo "  最多等 12 小时 · 日志 $LOG · 撤销: systemctl --user stop $unit"
+  exit 0
+fi
+if [ "${1:-}" = "__wait" ]; then
+  shift; prev=$1; shift; log=$LOG; start=$(date +%s); mkdir -p "$(dirname "$log")"
+  cap() { tmux capture-pane -pt "$prev" -S -400 2>/dev/null || $T capture-pane -pt "$prev" -S -400 2>/dev/null; }
+  until cap | grep -q 'Goal complete' && ! pgrep -f '[o]md-lite run' >/dev/null; do
+    cap >/dev/null || { echo "$(date '+%F %T') after: $prev 会话不在了,不起 $1" >> "$log"; exit 1; }
+    [ $(( $(date +%s) - start )) -gt 43200 ] && { echo "$(date '+%F %T') after: $prev 等了 12 小时还没完成,不起 $1" >> "$log"; exit 1; }
+    sleep 120
+  done
+  echo "$(date '+%F %T') after: $prev 完成 → mgo $*" >> "$log"
+  exec "$0" "$@" >> "$log" 2>&1
+fi
+
+[ $# -ge 1 ] && [ -f "$1" ] || { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+goal=$(realpath "$1"); shift
+dir=$PWD; name="mg-$(basename "$goal" .md)"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) dir=$(realpath "$2"); shift 2 ;;
+    -n) name=$2; shift 2 ;;
+    --) shift; break ;;
+    *) echo "未知参数: $1" >&2; exit 1 ;;
+  esac
+done
+extra=""; [ $# -gt 0 ] && extra=$(printf '%q ' "$@")
+
+$T has-session -t "$name" 2>/dev/null && { echo "会话 $name 已存在($T a -t $name 看看,或 -n 换名)" >&2; exit 1; }
+[ -n "$VT_UNIT" ] && { systemctl --user is-active -q "$VT_UNIT" || systemctl --user start "$VT_UNIT"; }
+
+systemd-run --user --scope --quiet --collect $T new -d -s "$name" -c "$dir" -x 160 -y 48 "bash -ic 'vt mcode $extra; exec bash'"
+
+wait_for() {  # wait_for <文本> <秒>
+  for _ in $(seq "$2"); do $T capture-pane -pt "$name" | grep -qF "$1" && return 0; sleep 1; done
+  return 1
+}
+wait_for 'Ask Mcode to do anything' 90 || { echo "mcode 90 秒没起来,现场: $T a -t $name" >&2; exit 1; }
+
+$T send-keys -t "$name" -l "/goal 先逐字读完 $goal 再动手,照其中的规矩与步骤执行;完成标准以该文件写的为准,做完按文件要求写报告。"
+ok=""
+for _ in 1 2 3; do  # 长行输入后 TUI 可能还停在「Goal · Enter start」,Enter 早到会被吞,没生效就再按
+  sleep 2; $T send-keys -t "$name" Enter
+  wait_for 'Goal · Active' 10 && { ok=1; break; }
+done
+[ -n "$ok" ] || { echo "/goal 没生效,现场: $T a -t $name" >&2; exit 1; }
+
+mkdir -p "$(dirname "$LOG")"
+echo "$(date '+%F %T') $name $dir $goal" >> "$LOG"
+echo "✓ $name 已起,goal 生效 · 目录 $dir"
+echo "  手机: $VT_URL · 桌面: $T a -t $name · 总览: mgo ls"

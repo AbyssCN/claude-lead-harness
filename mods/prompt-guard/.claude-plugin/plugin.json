@@ -1,0 +1,1 @@
+{ "name": "prompt-guard", "version": "0.1.0", "description": "Stops prompts that contain API keys or passwords (puts a redacted copy back in the input box) and drops the same message re-sent within a few minutes.", "types": "./types/index.d.ts" }

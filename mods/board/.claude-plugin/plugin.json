@@ -1,0 +1,9 @@
+{
+  "name": "board",
+  "version": "0.4.0",
+  "description": "进度板:/board 一屏看当前仓的下一步 · GOAL 勾选 · 待拍板 · TODO · roadmap 在进行项 · 在跑的片 · 最近提交;/board <仓名> 看别的仓,/board all 各仓摘要。纯读文件,不调模型",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "reposDir": { "type": "string", "title": "仓库目录", "description": "/board <仓名> 与 /board all 在这里找仓,支持 ~/;空 = ~/repos。会话在其下时以 <reposDir>/<仓名> 为仓根", "default": "" }
+  }
+}

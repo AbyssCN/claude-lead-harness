@@ -1,0 +1,8 @@
+{
+  "name": "agent-guard",
+  "version": "0.2.0",
+  "description": "Guard for dispatching subagents: denies isolation \"worktree\", checks a declared WORKTREE is a separate, clean, never-dispatched git worktree, and in opted-in repos requires non-read-only subagents to declare one.",
+  "userConfig": {
+    "requireWorktreeRepos": { "type": "string", "title": "必须带 WORKTREE 的仓库", "description": "仓库目录名,逗号分隔;这些仓库里非只读的子 agent 必须写一行 WORKTREE: <路径>(纯调研可写 WORKTREE: none)。也可在仓库里放 .claude/agent-guard.json 开启", "default": "" }
+  }
+}

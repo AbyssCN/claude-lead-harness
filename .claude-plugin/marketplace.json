@@ -1,0 +1,40 @@
+{
+  "name": "claude-lead-harness",
+  "owner": {
+    "name": "AbyssCN"
+  },
+  "plugins": [
+    {
+      "name": "relay",
+      "source": "./mods/relay"
+    },
+    {
+      "name": "cue",
+      "source": "./mods/cue"
+    },
+    {
+      "name": "delegate",
+      "source": "./mods/delegate"
+    },
+    {
+      "name": "board",
+      "source": "./mods/board"
+    },
+    {
+      "name": "agent-guard",
+      "source": "./mods/agent-guard"
+    },
+    {
+      "name": "prompt-guard",
+      "source": "./mods/prompt-guard"
+    },
+    {
+      "name": "copy-lint",
+      "source": "./mods/copy-lint"
+    },
+    {
+      "name": "savvy-progress",
+      "source": "./mods/savvy-progress"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "delegate",
+  "version": "0.1.1",
+  "description": "lead 的外部 run 驾驶舱:扫描本会话的 omd-lite run($.delegate.runs)、守 launch(任务书 C-1b · 允许改动不重叠 · 起片间隔 · 磁盘预算)、把 --gate 包进按内存排队的 gate-slot.sh、run 结束合成一条叫醒、合并后清 worktree。不切片、不写任务书、不选执行器。",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "launchSpacingSeconds": {
+      "type": "number",
+      "title": "起片最小间隔(秒)",
+      "description": "两次 omd-lite launch 之间至少隔多少秒;0 = 不限",
+      "default": 10
+    },
+    "diskBudgetGB": {
+      "type": "number",
+      "title": "omdl-* worktree 磁盘预算(GB)",
+      "description": "仓库旁 omdl-* worktree 总量超过它就拒绝新 launch",
+      "default": 40
+    },
+    "minFreeGB": {
+      "type": "number",
+      "title": "最少盘余(GB)",
+      "description": "仓库所在盘剩余低于它就拒绝新 launch",
+      "default": 50
+    },
+    "omdLitePath": {
+      "type": "string",
+      "title": "omd-lite 路径",
+      "description": "合并后清理用的 omd-lite CLI:命令名(走 PATH)、绝对路径或 ~/ 开头",
+      "default": "omd-lite"
+    }
+  }
+}

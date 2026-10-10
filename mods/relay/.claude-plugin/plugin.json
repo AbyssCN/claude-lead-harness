@@ -1,0 +1,18 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "description": "接力:/goal 把一句话写成 GOAL.md 并按 RELAY 行自动续跑到验收命令全过或真 owner 岔口才停;按 phase 切 effort;上下文到阈值自动交接、/clear 后带 GOAL 接着做;磁盘余量提醒和 /ops",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "thresholdTokens": { "type": "number", "title": "交接阈值(token)", "description": "上下文到这个量就开始交接;0 关闭自动交接", "default": 500000 },
+    "delaySeconds": { "type": "number", "title": "clear 前等待(秒)", "description": "交接写好后等这么久再自动 /clear;期间你发任何消息就取消", "default": 30 },
+    "heartbeatMinutes": { "type": "number", "title": "等待心跳(分钟)", "description": "lead 写 phase=wait 后,这么久没被唤醒就发一次心跳 prompt", "default": 25 },
+    "maxTurns": { "type": "number", "title": "每个 GOAL 最多轮数", "description": "relay 自动续跑的轮数上限,到了停下等你", "default": 200 },
+    "subagentEffort": { "type": "string", "title": "子 agent effort", "description": "按 agent 类型设 effort,如 Explore=low, Plan=high;没列的类型不改", "default": "" },
+    "reposDir": { "type": "string", "title": "仓库目录", "description": "放各个仓和 worktree 的目录,支持 ~/;空 = ~/repos。/ops 在这里找 worktree,会话在其下时以 <reposDir>/<仓名> 为仓根", "default": "" },
+    "worktreePrefixes": { "type": "string", "title": "worktree 目录前缀", "description": "reposDir 下按这些前缀(逗号分隔)认出派发脚本留下的 worktree", "default": "omdl-,agent-" },
+    "diskPath": { "type": "string", "title": "磁盘检查路径", "description": "df 查余量的路径,支持 ~/;空 = 当前仓根", "default": "" },
+    "diskMinGB": { "type": "number", "title": "磁盘最少余量(GB)", "description": "低于它就提醒一次;0 关闭提醒", "default": 50 },
+    "checkpointCommand": { "type": "string", "title": "clear 前补存 checkpoint 的命令", "description": "自动 /clear 前同步跑一次(空格分隔,{transcript} {session} 会被替换,支持 ~/),如 bun run ~/tools/session-writer.ts --transcript {transcript} --session {session} --precompact;空 = 不补存", "default": "" }
+  }
+}
