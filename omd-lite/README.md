@@ -159,3 +159,12 @@ pi 的参数固定为
 - 模型的 bash 工具继承 pi 的环境，看得到 `.env` 里的密钥;产物只在本机 `~/.omd-lite`。
 - `cost` 取自 pi 的 usage;models.json 没配价格的供应商(如 minimax-cp)显示 0。
 - 闸在第一个失败处停，同一轮后面的闸不跑。
+
+## 稀疏检出(可选)
+
+大仓库里常有执行手用不到的存档目录(旧评审截图、调研资料)。`--sparse-exclude "docs/design/reviews,docs/reviews,docs/research"`(或环境变量 `OMD_LITE_SPARSE_EXCLUDE`)让 worktree 不检出它们:
+- 被任务书「允许改动」、任务书正文、base 上 `scripts` / `docs/design/tests` / `apps` / `packages` 里写死的路径点名的子目录，按「被排除目录的下一级」自动加回;
+- 执行手往没加回的目录写了文件，收尾时把那一级加回 sparse 定义，合并时 `git add` 不会拒收;
+- `--full` 关掉;`omd-lite sparse-plan --repo R --base B --spec S` 只打印计划不建 worktree。
+
+一个中型 monorepo 实测：每个 worktree 1301 MB → 392 MB,建 worktree 7 s → 2 s。

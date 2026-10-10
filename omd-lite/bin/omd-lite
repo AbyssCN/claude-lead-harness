@@ -26,6 +26,8 @@ const USAGE = `用法:
                                        MiniMax 一律 high(pi --thinking / mcode --effort)。三种执行器的进度都同时打到终端 ——
                                        用 \`vt omd-lite run …\` 启动即可在 VibeTunnel 里看
   omd-lite report <label>...
+  稀疏检出:--sparse-exclude "a,b" 列出不检出的存档目录(任务书 / 脚本点名的子目录自动加回);
+    也可用 OMD_LITE_SPARSE_EXCLUDE,--full 关掉;omd-lite sparse-plan --repo R --base B --spec S 只看计划
   omd-lite clean <label>          删除该 run 的 worktree 与分支(保留 ~/.omd-lite/runs/<label>)
   omd-lite retro [--since YYYY-MM-DD] [label…]   批后复盘:逐 run 表 + 聚合(只列 ≥ 2 个 run 的模式),纯读 runs 目录
   omd-lite gc [--older-than <天>=2] [--apply]     列出可清的 run worktree / 分支(默认只预览;run 记录保留)`;
@@ -42,6 +44,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--no-context") { o.noContext = true; continue; }
+    if (a === "--full") { o.full = true; continue; }
     if (!a.startsWith("--")) die(`多余参数: ${a}\n${USAGE}`);
     const k = a.slice(2), v = argv[++i];
     if (v === undefined) die(`${a} 缺值`);
@@ -112,12 +115,18 @@ async function run(o) {
   const baseSha = git(repo, "rev-parse", `${o.base}^{commit}`).trim();
   const wt = path.resolve(repo, "..", `omdl-${o.name}`);
   const branch = `omdl/${o.name}`;
-  git(repo, "worktree", "add", wt, "-b", branch, baseSha);
+  // 稀疏检出:存档类大目录(旧评审截图、调研)不检出;--full 关掉
+  const sparse = o.full ? null : sparsePlan(repo, baseSha, o.spec, o.sparse_exclude ?? process.env.OMD_LITE_SPARSE_EXCLUDE ?? SPARSE_DEFAULT);
+  if (sparse) {
+    git(repo, "worktree", "add", "--no-checkout", wt, "-b", branch, baseSha);
+    git(wt, "sparse-checkout", "set", "--no-cone", ...sparsePatterns(sparse));
+    git(wt, "checkout", "-q");
+  } else git(repo, "worktree", "add", wt, "-b", branch, baseSha);
   fs.mkdirSync(out, { recursive: true });
   const meta = {
     label: o.name, model: o.model, prompt_arm: o.prompt, prompt_file: prompt.file, context: !o.noContext,
     repo, base: o.base, base_sha: baseSha, worktree: wt, branch, spec: o.spec, gates: o.gate,
-    max_rounds: Number(o.max_rounds || 3),
+    max_rounds: Number(o.max_rounds || 3), sparse,
     executor: o.executor || "pi",
     // 嵌套在哪个 Claude Code 会话里启动(进度 mod 只显示本会话的 run);driver_pid 判活
     claude_session: process.env.CLAUDE_CODE_SESSION_ID || null, driver_pid: process.pid,
@@ -179,6 +188,7 @@ function finish({ o, meta, out, wt, baseSha, linked, resultFile, code }) {
     // 闸从没判过(供应商报错到底 / 超时 / pi 起不来)—— 不是 pass 也不是 fail
     fs.writeFileSync(resultFile, JSON.stringify({ gates: "not-run", pi_exit: code }) + "\n");
   }
+  if (meta.sparse) widenSparse(wt, meta.sparse, baseSha);
   fs.writeFileSync(path.join(out, "diffstat.txt"), git(wt, "diff", "--stat", baseSha));
   const changed = [
     ...git(wt, "diff", "--name-only", baseSha).split("\n"),
@@ -448,6 +458,55 @@ function providerError(jsonl) {
   }
   const m = last?.messages?.at(-1);
   return m?.role === "assistant" && m.stopReason === "error" ? m.errorMessage || "error" : null;
+}
+
+// ── 稀疏检出 ─────────────────────────────────────────────────────────────────────
+// 不检出的存档目录(--sparse-exclude / OMD_LITE_SPARSE_EXCLUDE 给;base 里没有的自动跳过)。被以下三处点名的子目录加回来:
+// 任务书「允许改动」· 任务书正文里写到的路径 · base 上 scripts / docs/design/tests / apps / packages 里写死的路径(截图脚本读已批的参考图、写自己的输出目录)。
+// 公开版默认不排除任何目录(清单因仓而异);例:OMD_LITE_SPARSE_EXCLUDE="docs/design/reviews,docs/reviews,docs/research"
+const SPARSE_DEFAULT = "";
+
+function sparsePlan(repo, baseSha, spec, excludeCsv) {
+  const exists = (p) => spawnSync("git", ["-C", repo, "cat-file", "-e", `${baseSha}:${p}`]).status === 0;
+  const exclude = String(excludeCsv).split(",").map((s) => s.trim().replace(/\/+$/, "")).filter((d) => d && exists(d));
+  if (!exclude.length) return null;
+  const keep = new Set();
+  // 加回到「被排除目录的下一级」,让同目录的兄弟文件(对照图)也在
+  const add = (raw) => {
+    const p = raw.replace(/^\.\//, "").replace(/[`'"),.;:：，。]+$/, "");
+    for (const d of exclude) {
+      if (p === d) return keep.add(d);
+      if (p.startsWith(d + "/")) return keep.add(d + "/" + p.slice(d.length + 1).split("/")[0]);
+    }
+  };
+  const specText = spawnSync("git", ["-C", repo, "show", `${baseSha}:${spec}`], { encoding: "utf8" }).stdout || "";
+  const allowed = allowedFromSpec({ repo, base_sha: baseSha, spec }) || [];
+  for (const a of allowed) add(a);
+  for (const m of specText.matchAll(/[\w.-]+(?:\/[\w.@-]+)+/g)) add(m[0]);
+  const pattern = exclude.map((d) => d.replace(/[.]/g, "\\.") + "/[A-Za-z0-9._@-]+").join("|");
+  const g = spawnSync("git", ["-C", repo, "grep", "-ohE", pattern, baseSha, "--", "scripts", "docs/design/tests", "apps", "packages"], { encoding: "utf8" });
+  for (const l of (g.stdout || "").split("\n")) if (l) add(l);
+  return { exclude, keep: [...keep].sort() };
+}
+
+const sparsePatterns = ({ exclude, keep }) => ["/*", ...exclude.map((d) => `!/${d}/`), ...keep.map((k) => `/${k}`), ...keep.map((k) => `/${k}/`)];
+
+// 执行手往没加回的被排除目录里写了文件:把那一级加回 sparse 定义,否则合并时 git add 会拒收这些路径
+function widenSparse(wt, sparse, baseSha) {
+  const files = [
+    ...git(wt, "diff", "--name-only", baseSha).split("\n"),
+    ...git(wt, "ls-files", "--others", "--exclude-standard").split("\n"),
+  ].filter(Boolean);
+  const more = new Set();
+  for (const f of files) for (const d of sparse.exclude) {
+    if (!f.startsWith(d + "/")) continue;
+    const k = d + "/" + f.slice(d.length + 1).split("/")[0];
+    if (!sparse.keep.includes(k)) more.add(k);
+  }
+  if (!more.size) return;
+  sparse.keep = [...new Set([...sparse.keep, ...more])].sort();
+  sparse.widened = [...more].sort();
+  git(wt, "sparse-checkout", "set", "--no-cone", ...sparsePatterns(sparse));
 }
 
 // 任务书里以「允许改动:」开头的那一行 → 允许路径表(逗号 / 顿号 / 空白分隔,目录以 / 结尾或按前缀)
@@ -794,6 +853,13 @@ if (cmd === "run") run(parseArgs(rest)).catch((e) => die(e.stack || String(e)));
 else if (cmd === "report") report(rest);
 else if (cmd === "clean") clean(rest);
 else if (cmd === "retro") retro(rest);
+else if (cmd === "sparse-plan") {
+  // 只看不建:某份任务书在某个 base 上会被怎么稀疏检出
+  const o = parseArgs(rest);
+  const repo = path.resolve(o.repo);
+  const plan = sparsePlan(repo, git(repo, "rev-parse", `${o.base}^{commit}`).trim(), o.spec, o.sparse_exclude ?? process.env.OMD_LITE_SPARSE_EXCLUDE ?? SPARSE_DEFAULT);
+  console.log(JSON.stringify(plan, null, 2));
+}
 else if (cmd === "gc") gc(rest);
 else die(USAGE);
 
