@@ -30,8 +30,8 @@ function sandbox({ merged = true } = {}) {
   fs.copyFileSync(path.join(FIX, "prune-agent-worktrees.sh.orig"), path.join(home, ".claude", "bin", "prune-agent-worktrees.sh"));
   fs.chmodSync(path.join(home, ".claude", "bin", "prune-agent-worktrees.sh"), 0o755);
   fs.writeFileSync(path.join(home, ".claude", "settings.json"), JSON.stringify({
-    enabledPlugins: { "agent-guard@owner-mods": true },
-    pluginConfigs: { "agent-guard@owner-mods": { options: { requireWorktreeRepos: "myapp,otherapp,oh-my-dag,omd-lite" } }, "other@x": { options: { a: 1 } } },
+    enabledPlugins: { "agent-guard@lead-harness": true },
+    pluginConfigs: { "agent-guard@lead-harness": { options: { requireWorktreeRepos: "myapp,otherapp,oh-my-dag,omd-lite" } }, "other@x": { options: { a: 1 } } },
     other: [1, 2],
   }, null, 2) + "\n");
   const sh = (args = [], env = {}) => spawnSync("bash", [SCRIPT, ...args], {
@@ -83,7 +83,7 @@ test("执行:目录改名 + 旧路径软链 + bin/omd-lite 软链 + PATH 入口 
   assert.equal(fs.readFileSync(prune + ".bak-S11", "utf8"), fs.readFileSync(path.join(FIX, "prune-agent-worktrees.sh.orig"), "utf8"));
   // F
   const st = w.settings();
-  assert.equal(st.pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos, "myapp,otherapp,oh-my-dag,omd-lite,piw");
+  assert.equal(st.pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos, "myapp,otherapp,oh-my-dag,omd-lite,piw");
   assert.deepEqual(st.pluginConfigs["other@x"], { options: { a: 1 } });
   assert.deepEqual(st.other, [1, 2]);
   assert.ok(fs.existsSync(path.join(w.home, ".claude", "settings.json.bak-S11")));
@@ -117,12 +117,12 @@ test("已经改过名的(只有 settings 没改)再跑:只补缺的一步", () =
   assert.equal(w.sh().status, 0);
   const f = path.join(w.home, ".claude", "settings.json");
   const j = w.settings();
-  j.pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos = "myapp,omd-lite";
+  j.pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos = "myapp,omd-lite";
   fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
   const r = w.sh();
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /改了 1 处/);
-  assert.equal(w.settings().pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos, "myapp,omd-lite,piw");
+  assert.equal(w.settings().pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos, "myapp,omd-lite,piw");
 });
 
 test("有 run 在跑:退出码 3,什么都不动", async () => {

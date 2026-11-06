@@ -687,7 +687,7 @@ async function startPanel($: EngineInterface): Promise<void> {
   } catch {
     // Unreadable settings: board takes the plan.
   }
-  planOn = enabled['helper-desk@owner-mods'] !== true
+  planOn = enabled['helper-desk@lead-harness'] !== true
   if (planOn) {
     await $.tool
       .register({

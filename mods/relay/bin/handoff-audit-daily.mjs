@@ -3,7 +3,7 @@
 // 跑 handoff-audit,当天读数写 <out>/<日期>.json,一行追加进 <out>/daily.jsonl;判据没到就在 claude-mods 里起一个
 // headless lead(claude -p)接着改,上一个 lead 还在跑就不起第二个。
 //
-// 用法:node handoff-audit-daily.mjs [--out 目录](默认 ~/.local/share/owner-mods/relay/audit)
+// 用法:node handoff-audit-daily.mjs [--out 目录](默认 ~/.local/share/lead-harness/relay/audit)
 
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdirSync, openSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
@@ -23,10 +23,10 @@ export function leadPrompt(reportPath) {
     `[relay 判官每日读数] \`${JUDGE}\` 没过,读数在 ${reportPath}(verdict 里列了没到的会话和数)。`,
     '终点:任何仓、任何时候、有没有 GOAL,会话都在 400k 附近被清掉,清完第一屏是 owner 没看到的原文。判官退出码 0 才算到,你说的不算。',
     '做法:先从读数定位是哪一条没到(① >400k 请求 > 20 或有 > 550k · compact_boundary · ③ GOAL 35 分内 cleared < 95% 或卡着 · ④ clear 后逐字原文缺段 · ⑤ /goal 落盘 p90 > 90 秒、落盘后 > 30 秒才收到激活、lead 自己 Write 覆盖 GOAL.md、写出的 GOAL 有模板提示或「(待补:」),到会话记录和 ~/.claude/handoffs/handoff.log 里核对前提;',
-    '再改 relay/hooks/register.ts 等:先写失败测试、看它红,再写实现;跑 `claude plugin validate relay && claude plugin test relay && node --test \'relay/**/*.test.mjs\'` 全绿后 `claude plugin update relay@owner-mods`,按 /commit 提交到 master(不 push)。',
+    '再改 relay/hooks/register.ts 等:先写失败测试、看它红,再写实现;跑 `claude plugin validate relay && claude plugin test relay && node --test \'relay/**/*.test.mjs\'` 全绿后 `claude plugin update relay@lead-harness`,按 /commit 提交到 master(不 push)。',
     '已知的前提要先量后定:轮末才交接时,越过阈值那一轮结束前还会跑很多次 > 400k 请求(读数 crossTail);别直接把阈值拍低,先确认它是主因,再决定前移阈值还是在工具调用之间注入交接。④ 缺段时看是不是模型抄长原文走样。⑤ 慢时先按 handoff.log `goal` 行的路径(fork / complete)、秒数、输入大小定主因,再决定改 effort、改模型还是不再 fork 整段上下文;用「干净」这一项裁质量。',
     '⑦ 孤儿 GOAL(只量 0.8.0 起的会话)orphans / orphanBlind / orphanFalse 不是 0 时,先看每条的 evidence:blind 说明那个会话没写 owner.log 的 mode 行,是 relay 漏写;false 带 owner-alive 是属主活着却 35 分钟没有 relay 轮,查 relay 是不是卡住了。修 relay,不改判官(docs/plan/2026-10-23-relay-orphan-goal.md)。',
-    '改完把结论一行追加到 ~/.local/share/owner-mods/relay/audit/lead.md(日期 · 哪条没到 · 改了什么 · 提交号)。',
+    '改完把结论一行追加到 ~/.local/share/lead-harness/relay/audit/lead.md(日期 · 哪条没到 · 改了什么 · 提交号)。',
   ].join('\n')
 }
 
@@ -81,7 +81,7 @@ function alive(pidFile) {
 
 function main(argv) {
   const i = argv.indexOf('--out')
-  const out = i >= 0 ? argv[i + 1] : join(homedir(), '.local/share/owner-mods/relay/audit')
+  const out = i >= 0 ? argv[i + 1] : join(homedir(), '.local/share/lead-harness/relay/audit')
   const pidFile = join(out, 'lead.pid')
   const r = daily({
     out,

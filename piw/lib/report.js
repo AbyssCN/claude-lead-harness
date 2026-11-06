@@ -216,7 +216,7 @@ function report({ day, env = process.env, rolling = true } = {}) {
   day = day || localDay(Date.now());
   const usageDir = env.PIW_USAGE_DIR || path.join(os.homedir(), ".omd-lite", "usage");
   const balanceDir = env.PIW_BALANCE_DIR || path.join(os.homedir(), ".omd-lite", "balance");
-  const contDir = env.CONTINUITY_DATA_DIR || path.join(os.homedir(), ".local", "share", "owner-mods", "continuity");
+  const contDir = env.CONTINUITY_DATA_DIR || path.join(os.homedir(), ".local", "share", "lead-harness", "continuity");
   const rows = parseRows(path.join(usageDir, `${day}.jsonl`));
   const around = [-1, 0, 1].map((n) => shiftDay(day, n));
   const rows3 = around.flatMap((d) => (d === day ? rows : parseRows(path.join(usageDir, `${d}.jsonl`))));

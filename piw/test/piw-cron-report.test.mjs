@@ -37,11 +37,11 @@ function world({ exempt = [], fallbacks = [] } = {}) {
   return { session, run, html: () => fs.readFileSync(out, "utf8") };
 }
 
-const RCMUX = { name: "rcmux Lark bot", head: "^处理工单 ", why: "bot 本体与它的 boundary 回归" };
+const OPSBOT = { name: "ops-bot Lark bot", head: "^处理工单 ", why: "bot 本体与它的 boundary 回归" };
 const SEURANTA = { name: "acme seuranta", cwd: "^/mnt/nas/acme_internal/", why: "客户案卷留 Claude(owner 25.10)" };
 
 test("首行:无人值守 Claude <N>(豁免 <M>)—— 命中豁免的不计入 N(GWT-2)", () => {
-  const w = world({ exempt: [RCMUX, SEURANTA] });
+  const w = world({ exempt: [OPSBOT, SEURANTA] });
   w.session({ cwd: "/home/x/repos/marketing-hub", head: "处理工单 boundary-ratia-rules。" });
   w.session({ cwd: "/mnt/nas/acme_internal/operations/a", head: "You are the assistant of Acme Oy" });
   w.session({ cwd: "/tmp/x", head: "你是规格轴审查员" });
@@ -50,7 +50,7 @@ test("首行:无人值守 Claude <N>(豁免 <M>)—— 命中豁免的不计入 
   const r = w.run();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /无人值守 Claude 1\(豁免 2\)/);
-  assert.match(w.html(), /豁免:rcmux Lark bot/);
+  assert.match(w.html(), /豁免:ops-bot Lark bot/);
 });
 
 test("没有豁免表:所有 sdk-cli 非远程会话都计入", () => {

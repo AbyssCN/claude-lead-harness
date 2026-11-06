@@ -246,7 +246,7 @@ test('$.cacheClock.state() 回复后给出 lastEnd / ttlMs,没保温时 warm 为
 for (const board of [true, false]) {
   test(`board ${board ? '开着时缓存钟不画自己的横条' : '没开时缓存钟照旧画'}`, { timeoutMs: 30000 }, async ($, on) => {
     const { clock } = stub(on)
-    on('settings.read', async () => ({ value: { enabledPlugins: { 'board@owner-mods': board } } }) as never)
+    on('settings.read', async () => ({ value: { enabledPlugins: { 'board@lead-harness': board } } }) as never)
     await $.session.start({ ...start, surface: 'terminal' } as never)
     await $.turn.complete({ answer: '' } as never)
     await clock.settle()

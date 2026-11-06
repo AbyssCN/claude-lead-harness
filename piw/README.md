@@ -235,7 +235,7 @@ deploy/s11-rename.sh --dry-run   # 先看会做什么(不改任何东西)
 deploy/s11-rename.sh             # 执行;幂等,每处改线上文件前先备份 <文件>.bak-S11,已完成的步骤跳过
 ```
 
-脚本依次做:A 目录 `~/repos/omd-lite` → `~/repos/piw` + 原路径软链 + `git worktree repair`;B 确认 `bin/omd-lite` → `piw`;C `~/.local/bin/piw` → `~/repos/piw/bin/piw`;D `~/.omd-lite/bin/slot-run.sh` 的 pgrep 锚;E `~/.claude/bin/prune-agent-worktrees.sh` 认 `resumedFrom` 映射(`deploy/prune-agent-worktrees.sh.patch`,与 delegate 仓 S8 写的补丁同一份);F `~/.claude/settings.json` 的 `pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos` 加 `piw`(保留 `omd-lite`)。有 run 在跑就整个退出(退出码 3);`bin/piw` 不在(分支没合并)退出 4;线上文件和预期版本不符退出 5,不硬改。
+脚本依次做:A 目录 `~/repos/omd-lite` → `~/repos/piw` + 原路径软链 + `git worktree repair`;B 确认 `bin/omd-lite` → `piw`;C `~/.local/bin/piw` → `~/repos/piw/bin/piw`;D `~/.omd-lite/bin/slot-run.sh` 的 pgrep 锚;E `~/.claude/bin/prune-agent-worktrees.sh` 认 `resumedFrom` 映射(`deploy/prune-agent-worktrees.sh.patch`,与 delegate 仓 S8 写的补丁同一份);F `~/.claude/settings.json` 的 `pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos` 加 `piw`(保留 `omd-lite`)。有 run 在跑就整个退出(退出码 3);`bin/piw` 不在(分支没合并)退出 4;线上文件和预期版本不符退出 5,不硬改。
 
 上线后核对(这些依赖目录改名,本分支无法验):
 ```

@@ -65,7 +65,7 @@ let guard: Guard = 'refuse'
 let lastModel = ''
 // 已拦过一次的那次冷:同一个 lastEnd 再发就放行。
 let ackedAt = 0
-// board@owner-mods 开着:输入框上方归 board 画(D-14),这里不画横条。
+// board@lead-harness 开着:输入框上方归 board 画(D-14),这里不画横条。
 let yielded = false
 // $.cacheClock.state() 的读法;session.start 前为 null。
 let readState: (() => Promise<CacheClockState>) | null = null
@@ -455,7 +455,7 @@ async function boardOn($: EngineInterface): Promise<boolean> {
   try {
     const v = (await $.settings.read({ key: 'enabledPlugins' } as never)) as Record<string, unknown>
     const inner = v && typeof v === 'object' && 'enabledPlugins' in v ? v.enabledPlugins : v
-    return !!inner && typeof inner === 'object' && (inner as Record<string, unknown>)['board@owner-mods'] === true
+    return !!inner && typeof inner === 'object' && (inner as Record<string, unknown>)['board@lead-harness'] === true
   } catch {
     return false
   }

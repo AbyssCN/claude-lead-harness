@@ -32,7 +32,7 @@ function world(on: On, usage: Usage) {
   on('session.id', async () => ({ value: 'sid1' }) as never)
   on('session.model', async () => ({ value: 'claude-opus-5-5' }) as never)
   on('session.usage', async () => ({ value: { startedAt: NOW, ...usage } }) as never)
-  on('settings.read', async () => ({ value: { enabledPlugins: { 'board@owner-mods': true } } }) as never)
+  on('settings.read', async () => ({ value: { enabledPlugins: { 'board@lead-harness': true } } }) as never)
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('tool.register', async ($, e) => ({ value: { tool: `mcp__board__${(e as { name: string }).name}` } }) as never)
   on('prompt.compose', async () => ({ sections: [] }) as never)

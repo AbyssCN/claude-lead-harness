@@ -33,7 +33,7 @@ function world(on: On, enabled: Record<string, boolean>): World {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: `${HOME}/repos/myapp` }))
   on('session.id', async () => ({ value: 'sid1' }) as never)
-  on('settings.read', async () => ({ value: { enabledPlugins: { 'board@owner-mods': true, ...enabled } } }) as never)
+  on('settings.read', async () => ({ value: { enabledPlugins: { 'board@lead-harness': true, ...enabled } } }) as never)
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('tool.register', async ($, e) => {
     tools.push((e as { name: string }).name)
@@ -97,7 +97,7 @@ const steps3 = [
 
 describe('board pane: plan tool, helper cards, 500ms clock', () => {
   test('GWT-1: helper-desk not enabled, no option → plan tool registered, board prompt injected', async ($, on) => {
-    const w = world(on, { 'helper-desk@owner-mods': false })
+    const w = world(on, { 'helper-desk@lead-harness': false })
     await start($, 'terminal')
     expect(w.tools).toContain('plan')
     const text = await promptText($)
@@ -106,7 +106,7 @@ describe('board pane: plan tool, helper cards, 500ms clock', () => {
   })
 
   test('GWT-1b: helper-desk enabled → board registers no plan tool and injects no plan prompt', async ($, on) => {
-    const w = world(on, { 'helper-desk@owner-mods': true })
+    const w = world(on, { 'helper-desk@lead-harness': true })
     await start($, 'terminal')
     expect(w.tools).not.toContain('plan')
     expect((await promptText($)).includes('mcp__board__plan')).toBe(false)

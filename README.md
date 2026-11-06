@@ -2,7 +2,7 @@
 
 > Run a software team out of Claude Code: one lead session you talk to, ticket sessions it spawns in herdr, cheap executors in isolated worktrees, and deterministic gates that decide what counts as done. Extracted from the workflow behind a production SaaS built by one person.
 
-一套可以直接拿去用的 agent 工作流:你只和一个总管会话说话,总管按单拉起主管会话,主管调度执行体,闸决定算不算完。它来自一个一个人开发的线上 SaaS,这里是去掉项目内容后的通用版。
+一套可以直接拿去用的 agent 工作流:你只和一个总管会话说话,总管按单拉起主管会话,主管调度执行体,闸决定算不算完。它来自一个人开发的线上 SaaS,这里是去掉项目内容后的通用版。
 
 ```
 你 → 总管(lead,常驻) → 主管(一单一个会话,在 herdr 里) → 执行体(子 agent · 便宜模型)

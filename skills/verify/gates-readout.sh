@@ -10,7 +10,7 @@ ref=${READOUT_REF:-${2:-master}}
 [ -n "${READOUT_PATH:-}" ] && export PATH=$READOUT_PATH
 G=$(dirname "$(readlink -f "$0")")/gates.mjs
 name=$(basename "$repo")
-out=${READOUT_DIR:-$HOME/.local/share/owner-mods/gates/$name}
+out=${READOUT_DIR:-$HOME/.local/share/lead-harness/gates/$name}
 mkdir -p "$out"
 
 sha=$(git -C "$repo" rev-parse --short "$ref") || exit 1

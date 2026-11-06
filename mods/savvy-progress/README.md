@@ -1,6 +1,6 @@
 > **已并入 board(2026-10-23)**:任务条、helper 卡、像素造型和计划工具都由 board 侧栏接管，计划工具改名 `mcp__board__plan`。本目录已从 marketplace 下架，不再维护。契约见 `docs/plan/2026-10-23-board-unified.md`。
 
-# savvy-progress (owner-mods fork)
+# savvy-progress (lead-harness fork)
 
 Fork of [johnnyvizz/claude-kit](https://github.com/johnnyvizz/claude-kit) `plugins/savvy-progress` 1.2.0 (MIT, see `LICENSE`).
 The fork keeps the name, so savvy-flow's tool names still match, and adds **omd-lite runs** and a Chinese UI (`language: zh`).

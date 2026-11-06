@@ -316,7 +316,7 @@ async function parkCue($: EngineInterface, set: CueSet, why: string, outbox: str
   held.push({ ts: await $.clock.now(), turnId: set.turnId, n, title: c.title, prompt: c.prompt, why })
   await $.store.set(key, held.slice(-20))
   const text = `cue 有一条草稿碰到${why},没替你发，等你点头(${name}${pane ? ` · ${pane}` : ''} · 待owner #${n}):「${c.title}」\n${c.prompt}\n要发：在那个会话里打 /cue send ${n}`
-  // The outbox rings the phone once per family a day (rcmux p0-policy): the family is per session, so one session's
+  // The outbox rings the phone once per family a day (ops-bot p0-policy): the family is per session, so one session's
   // second draft goes to the digest, another session's first still rings. The notification goes out every time.
   const argv = outbox.map((a) => a.replace(/^~\//, `${h}/`))
   const line = JSON.stringify({ dedupKey: `cue-park-${sid.slice(0, 8)}:${set.turnId}`, kind: 'p0', text })

@@ -17,7 +17,7 @@
 #   C. ~/.local/bin/piw -> ~/repos/piw/bin/piw(piw 进 PATH)
 #   D. ~/.omd-lite/bin/slot-run.sh:pgrep 锚认 (omd-lite|piw)
 #   E. ~/.claude/bin/prune-agent-worktrees.sh:认 resumedFrom 映射(deploy/prune-agent-worktrees.sh.patch)
-#   F. ~/.claude/settings.json:pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos 加 piw(保留 omd-lite)
+#   F. ~/.claude/settings.json:pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos 加 piw(保留 omd-lite)
 #
 # 不碰:~/.omd-lite/runs、omdl/ 与 omdl- 前缀、OMD_LITE_OUT 的写出、~/.config/piw、~/.pi。
 # 回滚:把 .bak-S11 备份放回原处;rm ~/.local/bin/piw;rm ~/repos/omd-lite && mv ~/repos/piw ~/repos/omd-lite && git -C ~/repos/omd-lite worktree repair。
@@ -81,7 +81,7 @@ add_piw_to_settings() { # <settings.json>
   local f=$1 tmp
   backup "$f"
   tmp=$(mktemp "$f.XXXXXX")
-  jq '.pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos |= (. + ",piw")' "$f" > "$tmp"
+  jq '.pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos |= (. + ",piw")' "$f" > "$tmp"
   jq -e . "$tmp" >/dev/null
   chmod --reference="$f" "$tmp"
   mv "$tmp" "$f"
@@ -159,7 +159,7 @@ fi
 if [ ! -f "$SETTINGS" ]; then
   say "F $SETTINGS 不存在,跳过。"
 else
-  cur=$(jq -r '.pluginConfigs["agent-guard@owner-mods"].options.requireWorktreeRepos // empty' "$SETTINGS")
+  cur=$(jq -r '.pluginConfigs["agent-guard@lead-harness"].options.requireWorktreeRepos // empty' "$SETTINGS")
   if [ -z "$cur" ]; then
     done_ "F settings.json 里没有 requireWorktreeRepos(用插件默认值;agent-guard 代码里会自动补 piw)"
   elif printf '%s' "$cur" | tr ',' '\n' | grep -qx 'piw'; then

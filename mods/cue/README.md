@@ -61,7 +61,7 @@ systemctl --user daemon-reload && systemctl --user enable --now cue-stuck-scan.t
 - `engine`:`fork`(默认,主模型带完整上下文,上下文走主线缓存)· `haiku`(只看最后一条回答,便宜但浅)· `off`(回答后不自动生成,`/enhance` 仍可用)。
 - `minChars`:回答短于此字符数不生成,默认 80。
 - `popup`:`auto`(默认,有手机挂着才弹窗;只有终端时不弹,不抢桌前的键盘)· `always`(总是弹)· `off`(从不弹)。
-- `outbox`:敏感草稿发手机用的命令(JSON 数组,stdin 每行 `{dedupKey,text,kind}`),默认 rcmux 的 `freezewatch-outbox.ts enqueue`;`[]` 不发。
+- `outbox`:敏感草稿发手机用的命令(JSON 数组,stdin 每行 `{dedupKey,text,kind}`),默认 ops-bot 的 `freezewatch-outbox.ts enqueue`;`[]` 不发。
 
 ## 提词方法
 

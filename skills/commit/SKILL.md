@@ -6,7 +6,7 @@ trigger: mention
 description: "git commit:先按仓内 `.claude/delegate.json` 跑 /verify(没配闸就报错不提交;仅层闸仓里要提交的路径必须被 PASS 的层闸覆盖,否则不提交),只 stage 本次改动的显式路径,写中文 conventional message。不做 PR / 合并 / push(除非用户明说)。Trigger: 提交 / commit / 保存变更 / git commit / 提交代码 / 帮我提交。Skip: 仅验证不提交 (/verify) / 代码审查 (/code-review)。"
 metadata:
   version: "4.3.0"
-  note: "15.10 改写:旧版是 rcmux 口径(bunx tsc / bun test、--ship 走 PR、带 Co-Authored-By 署名行 —— myapp 的 git 闸会拒这种提交)。"
+  note: "15.10 改写:旧版是 ops-bot 口径(bunx tsc / bun test、--ship 走 PR、带 Co-Authored-By 署名行 —— myapp 的 git 闸会拒这种提交)。"
 ---
 # /commit — 验证后提交
 

@@ -49,7 +49,7 @@ RELAY: replan <原因> -> <新项>
 
 `node bin/handoff-audit.mjs [--since ISO] [--until ISO] [--json] [目录或文件 …]`:零模型,读 `~/.claude/projects/-home-owner-repos-*`(不含 worktree)里有 owner 发过消息的会话,出四个数:① 每个会话 `cache_read_input_tokens` > 400k 的请求数(判据 ≤ 20)和 > 550k 的(判据 0),`compact_boundary` 次数(判据 0);② 轮中冲高(< 400k 开轮、轮内 > 550k);③ 每次 armed 的去向 —— cleared · owner 说话取消(35 分钟内说的才算)· 卡着 · 未满 35 分,GOAL 期间 35 分内 cleared 的比例(判据 ≥ 95%)与卡着条数(判据 0);④ 每次 clear 后,新会话第一轮回答是否逐字含 owner 清空前最后一条和它之后每一轮的回答(比原文,不比摘要);⑤ /goal:`/goal` 到 GOAL.md 落盘 p90 ≤ 90 秒、落盘到 lead 收到激活 ≤ 30 秒、lead 自己 Write 覆盖 0 次、写出的 GOAL 没有模板提示和「(待补:」(落盘时刻、走 fork 还是 complete、秒数、输入大小读 relay 每次 `/goal` 在 handoff.log 记的 `goal` 行)。有判据没到退出码 1。`--sessions id8,…` 只量这些会话和它们续接出来的会话。
 
-每日一跑:systemd 用户定时器 `relay-handoff-audit.timer`(06:47)调 `bin/handoff-audit-daily.mjs`。它从 `~/.claude/handoffs/handoff.log` 的 `start relay <版本>` 行(relay 每个 session 开头记一行;开着的窗口不会自己换版本)取 ≥ 0.6.0 的会话,并进 `~/.local/share/owner-mods/relay/audit/sessions.txt`,交给判官(`--since 2026-10-23T02:18:00Z --sessions …`);当天读数写 `<日期>.json`,一行进 `daily.jsonl`。判据没到就在 claude-mods 里起一个 headless lead(`claude -p`,日志 `lead-<日期>.log`,结论记 `lead.md`)接着改;上一个还在跑就不起第二个;还没有新版会话记 no-data。
+每日一跑:systemd 用户定时器 `relay-handoff-audit.timer`(06:47)调 `bin/handoff-audit-daily.mjs`。它从 `~/.claude/handoffs/handoff.log` 的 `start relay <版本>` 行(relay 每个 session 开头记一行;开着的窗口不会自己换版本)取 ≥ 0.6.0 的会话,并进 `~/.local/share/lead-harness/relay/audit/sessions.txt`,交给判官(`--since 2026-10-23T02:18:00Z --sessions …`);当天读数写 `<日期>.json`,一行进 `daily.jsonl`。判据没到就在 claude-mods 里起一个 headless lead(`claude -p`,日志 `lead-<日期>.log`,结论记 `lead.md`)接着改;上一个还在跑就不起第二个;还没有新版会话记 no-data。
 
 ## effort
 

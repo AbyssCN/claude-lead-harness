@@ -38,7 +38,7 @@ description: 一批 omd-lite(mcode / pi)run 合并后的复盘:先跑确定性�
    - **豁免带到期日与批准人**:闸上线时给既有违规开的豁免(白名单、基线、`ignoreUntil`)每条写 `到期 YYYY-MM-DD · 批准人`,
      不超过 90 天;每次 retro 列出 30 天内到期的豁免(`rg -n '到期 20' <豁免文件>`),到期前重判,不许静默续期。
 6. **产出 = 进台账,不写进没人看的文档**:
-   - 提案表写成 `~/.local/share/owner-mods/learn/proposals/<日期>-<仓>-manual.md`,表格式与 learn 每周 retro 相同
+   - 提案表写成 `~/.local/share/lead-harness/learn/proposals/<日期>-<仓>-manual.md`,表格式与 learn 每周 retro 相同
      (`<lead-harness>/learn/bin/retro-prompt.md`「提案文件格式」一节:# · 模式 · 次数 · 七类 · 去处 · 修复梯 · 改法 · 证据),**最多 5 行**,不放「不处理」行,末尾一行「没进表的:n 条(原因计数)」。
    - 入账:`bun <lead-harness>/learn/bin/proposals.ts ingest --repo <仓名> --date <日期>-manual --file <上面的文件> --worktree <仓根>`;
      它做同样的机械检查(缺证据的闸降级、没读者的审查标准丢、已有提案的模式不重提),stdout 是待批段 —— 追加进 `~/.claude/relay/待owner-<仓名>.md`。

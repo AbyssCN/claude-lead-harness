@@ -149,7 +149,7 @@ export function tick(prev: State, agents: Agent[], seen: Seen[], now: number): {
     })
   }
   // One message per tick, however many boxes crossed the line in it.
-  // The outbox rings once per key family a day and once per identity (the key less its timestamps) in 36 h (rcmux
+  // The outbox rings once per key family a day and once per identity (the key less its timestamps) in 36 h (ops-bot
   // p0-policy): both name the set of boxes, so a new set of stuck boxes rings, the same set again does not.
   const alerts: Alert[] = fresh.length
     ? [{ kind: 'p0', dedupKey: `cue-stuck-${hash(fresh.map((f) => f.split('」')[0]).sort().join('|'))}:${new Date(now).toISOString()}`, text: `cue 确认框卡住 ${fresh.length} 个(工作时间里开着超过 10 分钟):\n${fresh.join('\n')}` }]

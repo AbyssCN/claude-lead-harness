@@ -61,7 +61,7 @@ ticket close t1101-07
 
 ## 落点与环境变量
 
-- 记录:`~/.local/share/owner-mods/tickets/<仓>/<单号>.json` + `<单号>.events.jsonl`;叫醒没投出去的进 `<仓>/outbox.jsonl`,下一次任何 `ticket` 命令先补发。
+- 记录:`~/.local/share/lead-harness/tickets/<仓>/<单号>.json` + `<单号>.events.jsonl`;叫醒没投出去的进 `<仓>/outbox.jsonl`,下一次任何 `ticket` 命令先补发。
 - 单会话的 pane 带 `TICKET_ID` 与 `TICKET_STORE`(该仓的记录目录)。
 - `TICKET_ROOT` 换记录根目录(测试与冒烟用)· `TICKET_HERDR` 换 herdr 可执行文件(测试替身 `test/fake-herdr.mjs`)· `TICKET_MAX` 并发上限(默认 6)· `TICKET_START_TIMEOUT_MS`(默认 90000)· `TICKET_PROMPT_TIMEOUT_MS`(默认 60000)· `TICKET_CLOSE_TIMEOUT_MS`(默认 180000)。
 - `TICKET_LOCK_STALE_MS` 锁残留判定(默认 90000,大于最坏一次 herdr 调用 75 秒 = prompt 超时 60 秒 + 15 秒余量)· `TICKET_LOCK_WAIT_MS` 等锁上限(默认 15000,超了退 14)· `TICKET_SENDING_STALE_MS` 补发中(.sending)多久算死进程的残留(默认 180000)。

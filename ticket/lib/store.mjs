@@ -38,7 +38,7 @@ export class CorruptTicket extends Error {
 export function root() {
   if (process.env.TICKET_ROOT) return process.env.TICKET_ROOT;
   if (process.env.TICKET_STORE) return path.dirname(process.env.TICKET_STORE);
-  return path.join(os.homedir(), '.local/share/owner-mods/tickets');
+  return path.join(os.homedir(), '.local/share/lead-harness/tickets');
 }
 
 export const repoDir = (repo) => path.join(root(), repo);

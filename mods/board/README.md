@@ -21,7 +21,7 @@ relay 自动 /clear 之后随时看仓的进度,不用再问。纯读文件 + gi
 - `TodoWrite` / `TaskCreate` / `TaskUpdate` 也喂同一张计划。只认主对话，子 agent 的调用不算。
 - 计划写到 `~/.claude/mods-state/plan-<会话 id>.json`(`title` / `steps` / `updatedAt`),chat-inventory 照读。写失败只记 `~/.claude/mods-logs/board.log`,任务条照画。
 - 侧栏的任务条在「谁在跑」下面：桌面是紫色进度条 SVG(流光 2.6s、当前步呼吸 1.6s,系统开了减少动效就不动),终端是一行方块条加当前步。全部完成后停 20 秒再收起。
-- 让位:`enabledPlugins` 里 `helper-desk@owner-mods` 为 `true` 时，board 不注册 `plan`、不注入提示词，任务条也不画，免得两个计划工具打架。没有手动开关，关掉 helper-desk 后下一个会话自动接手。
+- 让位:`enabledPlugins` 里 `helper-desk@lead-harness` 为 `true` 时，board 不注册 `plan`、不注入提示词，任务条也不画，免得两个计划工具打架。没有手动开关，关掉 helper-desk 后下一个会话自动接手。
 
 ## helper 卡(谁在跑)
 
