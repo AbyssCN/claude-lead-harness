@@ -1,7 +1,7 @@
 > 示例：一个真实项目的执行者须知（`docs/process/executor-brief.md`）脱敏版。
-> `scripts/mcode.sh` 与 `omd-lite --executor mcode` 在目标仓里找到这个文件时，会让执行者开工前先读它。
+> `scripts/mcode.sh` 与 `piw --executor mcode` 在目标仓里找到这个文件时，会让执行者开工前先读它。
 
-# 执行者须知（mcode / omd-lite 的 pi 执行器）
+# 执行者须知（mcode / piw 的 pi 执行器）
 
 > 你是**执行者**，不是调度员。lead（Claude）负责规划、派活、验收、合并、发布；你只做**任务书里这一片**。
 > `CLAUDE.md` 开头的「身份 — 我是 lead」「派遣」「Owner 决策权」是给调度员的，**不适用于你**。

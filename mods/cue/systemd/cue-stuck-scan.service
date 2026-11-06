@@ -1,0 +1,10 @@
+[Unit]
+Description=cue 确认框读数:每拍扫 herdr 会话列表，记开着的 cue 框和开了多久，工作时间超 10 分钟进发件箱(t1102-07)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/share/fnm/aliases/default/bin:%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h/repos/claude-mods
+ExecStart=/usr/bin/env node %h/repos/claude-mods/cue/bin/cue-stuck-scan.ts
+StandardOutput=append:%h/.omd-lite/cue-stuck-scan.log
+StandardError=append:%h/.omd-lite/cue-stuck-scan.log

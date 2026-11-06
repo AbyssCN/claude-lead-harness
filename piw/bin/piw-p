@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# claude -p 的替身:无人值守 cron 把 `claude` 换成 `piw-p`,参数照旧。见 `piw --help` 的 agent 一节。
+exec node "$(dirname "$(readlink -f "$0")")/piw" agent "$@"

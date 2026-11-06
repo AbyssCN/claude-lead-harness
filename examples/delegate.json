@@ -1,0 +1,13 @@
+{
+  "launch": "scripts/dev/omdl-launch.sh",
+  "launchArgs": ["name", "base", "spec", "gate..."],
+  "sliceGate": "scripts/dev/gate-slice.sh",
+  "layerGates": [
+    { "pattern": "^migrations/", "cmd": "bash scripts/dev/replay-migrations.sh" },
+    { "pattern": "(^|/)package(-lock)?\\.json$", "cmd": "npm run build" }
+  ],
+  "sensitivePaths": "scripts/dev/sensitive-paths.txt",
+  "briefDeny": [
+    { "re": "\\.config/myapp-prod", "why": "production credentials must never reach an executor" }
+  ]
+}

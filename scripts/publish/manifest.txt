@@ -1,0 +1,27 @@
+# kind  source  destination
+mods relay mods/relay
+mods cue mods/cue
+mods delegate mods/delegate
+mods board mods/board
+mods agent-guard mods/agent-guard
+mods prompt-guard mods/prompt-guard
+mods copy-lint mods/copy-lint
+mods savvy-progress mods/savvy-progress
+mods cache-clock mods/cache-clock
+mods ticket ticket
+piw . piw
+skill grill skills/grill
+skill contract skills/contract
+skill verify skills/verify
+skill commit skills/commit
+skill retro skills/retro
+skill note skills/note
+skill investigate skills/investigate
+# excludes (rsync globs)
+! node_modules
+! __pycache__
+! docs/plan
+! cue.test.ts
+! test/fixtures/2026-11-02
+! brief-replay.fixtures.ts
+! autoresearch-*

@@ -1,0 +1,7 @@
+#!/bin/bash
+# 占一个片位跑一条重命令(与 gate-combo.sh 同一把锁 ~/.omd-lite/gates/combo.lock)。用法: slot-run.sh <日志> <目录> <命令…>
+log=$1; dir=$2; shift 2; lock=~/.omd-lite/gates/combo.lock
+while [ "$(pgrep -fc '^node /home/user/repos/omd-lite/bin/omd-lite run' || true)" -gt 3 ] || \
+      [ "$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)" -lt 16 ] || [ -f "$lock" ]; do sleep 30; done
+echo $$ > "$lock"; trap 'rm -f "$lock"' EXIT
+cd "$dir" && { echo "== $(date '+%T') $*"; "$@"; echo "EXIT=$?"; echo "== 结束 $(date +%T)"; } > "$log" 2>&1

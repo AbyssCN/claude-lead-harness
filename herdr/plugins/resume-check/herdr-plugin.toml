@@ -1,0 +1,9 @@
+id = "lead-harness.resume-check"
+name = "Resume check"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "After the server restarts, checks every agent pane resumed the session herdr recorded, and reports one line."
+platforms = ["linux"]
+
+[[startup]]
+command = ["python3", "-I", "check.py"]

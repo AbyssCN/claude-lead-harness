@@ -1,1 +1,1 @@
-{ "name": "copy-lint", "version": "0.2.0", "description": "After a Write/Edit to public copy (globs in the repo's .claude/copy-lint.json), checks banned words/phrases and heading punctuation and hints the model; never blocks the write." }
+{ "name": "copy-lint", "version": "0.2.0", "description": "MyApp 对外文案写入后自动查禁用词、标题句号和已废的片尾句,把命中提示给模型(不拦写入)" }

@@ -76,16 +76,24 @@ export function openDecisionRows(md: string): string[] {
     .filter(q => q !== '' && !q.startsWith('~~') && !/关闭/.test(q))
 }
 
-function renderList(s: Extract<BoardSection, { kind: 'list' }>, md: string): Rendered {
+// A list section's items: the ones after its `after` marker, or, when the file no longer has that marker,
+// every item under the heading (a _NEXT.md rewritten without its 下一步 line still lists what is on).
+export function listItems(s: Extract<BoardSection, { kind: 'list' }>, md: string): string[] {
   let lines = under(md, s.heading)
   if (s.after) {
     const re = new RegExp(s.after)
     const i = lines.findIndex(l => re.test(l))
-    lines = i < 0 ? [] : lines.slice(i + 1)
-    const end = lines.findIndex(l => /^(---|\*\*[^*]+\*\*\s*$)/.test(l))
-    if (end >= 0) lines = lines.slice(0, end)
+    if (i >= 0) {
+      lines = lines.slice(i + 1)
+      const end = lines.findIndex(l => /^(---|\*\*[^*]+\*\*\s*$)/.test(l))
+      if (end >= 0) lines = lines.slice(0, end)
+    }
   }
-  const items = topItems(lines)
+  return topItems(lines)
+}
+
+function renderList(s: Extract<BoardSection, { kind: 'list' }>, md: string): Rendered {
+  const items = listItems(s, md)
   const m = s.stamp ? md.match(new RegExp(s.stamp, 'm')) : null
   const stamp = m ? ` · ${plain(m[1] ?? m[0])}` : ''
   if (s.countOnly) return { summary: `${s.label} ${items.length} 条${stamp}`, detail: [] }
@@ -99,7 +107,7 @@ function renderList(s: Extract<BoardSection, { kind: 'list' }>, md: string): Ren
   }
 }
 
-// GOAL's in-progress marker: `- [ ] 〔进行中 <run名…>〕…`; dropped when the item is ticked.
+// GOAL's in-progress marker (owner 10.11): `- [ ] 〔进行中 <run名…>〕…`; dropped when the item is ticked.
 const RUNNING = /^〔进行中\s*([^〕]*)〕\s*/
 
 export type Group = { name: string; done: number; running: Array<{ title: string; runs: string }>; planned: string[] }
@@ -109,16 +117,23 @@ export function checklistGroups(md: string, group: '##' | '###'): Group[] {
   const groups: Group[] = []
   let g: Group | null = null
   const level = group.length
+  // A checkbox above any heading of the group's level files under the nearest higher heading (`## 清单`),
+  // so a GOAL written without `###` sections still reads as named sections.
+  let outer = '清单'
+  const nameOf = (h: string) => short(h.split(/[(（]/)[0] ?? h, 24)
   for (const line of md.split('\n')) {
     const h = line.match(/^(#+) (.*)$/)
     if (h && h[1]!.length <= level) {
-      g = h[1]!.length === level ? { name: short(h[2]!.split(/[(（]/)[0] ?? h[2]!, 24), done: 0, running: [], planned: [] } : null
-      if (g) groups.push(g)
+      if (h[1]!.length === level) groups.push((g = { name: nameOf(h[2]!), done: 0, running: [], planned: [] }))
+      else {
+        g = null
+        if (h[1]!.length > 1) outer = nameOf(h[2]!)
+      }
       continue
     }
     const c = line.match(/^- \[([ xX])\] (.*)$/)
     if (!c) continue
-    if (!g) groups.push((g = { name: '(未分节)', done: 0, running: [], planned: [] }))
+    if (!g) groups.push((g = { name: outer, done: 0, running: [], planned: [] }))
     if (c[1] !== ' ') {
       g.done++
       continue

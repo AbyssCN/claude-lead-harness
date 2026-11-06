@@ -1,40 +1,23 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { isCopyPath, lint, parseConfig } from './lint'
-import type { Config } from './lint'
+import { isCopyPath, isDocPath, lint, lintDoc } from './lint'
 
-const CONFIG = '.claude/copy-lint.json'
-
-// The nearest `.claude/copy-lint.json` above the file, stopping at the repo root (a `.git`).
-async function findConfig($: EngineInterface, file: string): Promise<{ base: string; config: Config } | null> {
-  let dir = file.replace(/\/[^/]*$/, '')
-  while (dir !== '') {
-    const path = `${dir}/${CONFIG}`
-    if (await $.fs.exists(path)) {
-      const text = await $.fs.read(path).then(t => t as string, () => null)
-      const config = parseConfig(text)
-      return config ? { base: dir, config } : null
-    }
-    if (await $.fs.exists(`${dir}/.git`)) return null
-    dir = dir.replace(/\/[^/]*$/, '')
-  }
-  return null
+// 每次判完写一行 ~/.omd-lite/discipline.jsonl(myapp 纪律普查 R17 读它)。
+async function log($: EngineInterface, hit: boolean, detail: string) {
+  const line = `${JSON.stringify({ ts: new Date().toISOString(), check: 'copy-lint', hit: hit ? 1 : 0, detail: detail.slice(0, 200) })}\n`
+  try { await $.process.run(['sh', '-c', 'mkdir -p "$HOME/.omd-lite" && cat >> "$HOME/.omd-lite/discipline.jsonl"'], { stdin: line }) } catch {}
 }
 
 export const register: Register = on => {
   on('tool.call', { tool: ['Write', 'Edit'] }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny !== undefined || ran.isError === true || !e.file_path.startsWith('/')) return ran
-    const found = await findConfig($, e.file_path)
-    if (!found) return ran
-    const rel = e.file_path.slice(found.base.length + 1)
-    if (!isCopyPath(rel, found.config)) return ran
+    const copy = isCopyPath(e.file_path)
+    if (ran.deny !== undefined || ran.isError === true || !(copy || isDocPath(e.file_path))) return ran
     const text = e.tool === 'Write' ? e.content : e.new_string
-    const hits = lint(text, found.config)
+    const hits = copy ? lint(text) : lintDoc(text)
+    await log($, hits.length > 0, `${e.file_path} ${hits.join(';')}`)
     if (hits.length === 0) return ran
-    const guide = found.config.guide ? `对照 ${found.config.guide} ` : ''
-    const note = `copy-lint(${e.file_path}):${hits.join(';')}。${guide}改掉;代码标识符里的不算。`
+    const note = `copy-lint(${e.file_path}):${hits.join(';')}。对照 docs/marketing/voice.md 和 CLAUDE.md 写作铁律改掉;代码标识符里的不算。`
     return { ...ran, context: [...(ran.context ?? []), note] }
-    // Only ever a hint: a fault here must not touch the write.
   }).catch(($, e, next) => next(e))
 }

@@ -1,0 +1,7 @@
+{
+  "roles": {
+    "worker": { "chain": ["<provider>/<cheap-coding-model>:high", "<provider>/<fallback-model>"] },
+    "judge-a": { "chain": ["<provider-a>/<reviewer-model>"] },
+    "judge-b": { "chain": ["<provider-b>/<reviewer-model>"] }
+  }
+}

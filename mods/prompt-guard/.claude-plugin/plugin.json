@@ -1,1 +1,1 @@
-{ "name": "prompt-guard", "version": "0.1.0", "description": "Stops prompts that contain API keys or passwords (puts a redacted copy back in the input box) and drops the same message re-sent within a few minutes.", "types": "./types/index.d.ts" }
+{ "name": "prompt-guard", "version": "0.1.1", "description": "拦下 prompt 里的密钥 / 密码(放回去掉密钥的文本),并丢掉几分钟内重复发送的同一条消息", "types": "./types/index.d.ts" }

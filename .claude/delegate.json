@@ -1,0 +1,8 @@
+{
+  "layerGates": [
+    { "pattern": ".", "cmd": "bash scripts/publish/scrub-check.sh ." },
+    { "pattern": "^mods/", "cmd": "for m in mods/*/; do claude plugin validate \"$m\" && claude plugin test \"$m\" || exit 1; done" },
+    { "pattern": "^piw/", "cmd": "cd piw && node --test --test-skip-pattern='gc:按名字判活' 'test/**/*.test.mjs'" },
+    { "pattern": "^ticket/", "cmd": "cd ticket && node --test 'test/*.test.mjs' 'bin/*.test.mjs'" }
+  ]
+}

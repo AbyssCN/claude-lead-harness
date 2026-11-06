@@ -1,11 +1,12 @@
 {
   "name": "savvy-progress",
-  "version": "1.2.0-fork.2",
+  "version": "1.3.0-owner.1",
   "description": "Fork of johnnyvizz/claude-kit savvy-progress 1.2.0: the /savvy-flow bar and /agents-info panel, plus omd-lite runs this session launched (mcode / claude -p / pi) with a pixel MiniMax.",
   "author": {
-    "name": "johnnyvizz (original); claude-lead-harness contributors (omd-lite fork)"
+    "name": "johnnyvizz (original); owner Liu (omd-lite fork)"
   },
   "types": "./types/index.d.ts",
+  "dependencies": ["delegate"],
   "userConfig": {
     "language": {
       "type": "string",

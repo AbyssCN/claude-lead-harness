@@ -4,8 +4,8 @@ export type Hit = { label: string; start: number; end: number }
 
 const PATTERNS: { label: string; re: RegExp }[] = [
   { label: 'Stripe 密钥', re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g },
-  { label: 'MiniMax 密钥', re: /\bsk-(?:cp)-[A-Za-z0-9_-]{20,}/g },
-  { label: 'Anthropic 密钥', re: /\bsk-(?:ant)-[A-Za-z0-9_-]{20,}/g },
+  { label: 'MiniMax 密钥', re: /\bsk-cp-[A-Za-z0-9_-]{20,}/g },
+  { label: 'Anthropic 密钥', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
   { label: 'API 密钥', re: /\bsk-[A-Za-z0-9]{32,}/g },
   { label: 'GitHub token', re: /\b(?:ghp|gho|ghs)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}/g },
   { label: 'AWS key', re: /\bAKIA[0-9A-Z]{16}\b/g },

@@ -1,59 +1,96 @@
 # claude-lead-harness
 
-> A set of Claude Code mods, plus a small driver for cheap executor models, that turns one Claude session into a lead: it plans, delegates coding slices to MiniMax Code, lets deterministic gates judge the result, and keeps going across context clears.
+> Run a software team out of Claude Code: one lead session you talk to, ticket sessions it spawns in herdr, cheap executors in isolated worktrees, and deterministic gates that decide what counts as done. Extracted from the workflow behind a production SaaS built by one person.
 
-一套 Claude Code mod + 执行手驱动:让一个 Claude 会话当 lead,负责拆任务、写任务书、看 diff、验收;写代码交给便宜的执行手(MiniMax Code `mcode` 或 pi);可靠性交给模型之外的确定性闸(tsc / 测试 / lint / 性能预算)。
+一套可以直接拿去用的 agent 工作流:你只和一个总管会话说话,总管按单拉起主管会话,主管调度执行体,闸决定算不算完。它来自一个一个人开发的线上 SaaS,这里是去掉项目内容后的通用版。
+
+```
+你 → 总管(lead,常驻) → 主管(一单一个会话,在 herdr 里) → 执行体(子 agent · 便宜模型)
+                                                                ↓
+                                                     闸(tsc · 测试 · lint):只看退出码
+```
+
+## 十分钟上手
+
+要 Claude Code · Node ≥ 22 · [herdr](https://herdr.dev) ≥ 0.9.5 · git · jq · ripgrep。执行体用 [pi](https://pi.dev)、`mcode` 或 `codex` 任一个。
+
+```bash
+git clone https://github.com/AbyssCN/claude-lead-harness ~/repos/claude-lead-harness
+cd ~/repos/claude-lead-harness
+scripts/install.sh                  # 查工具,链接 ticket · piw · skills · agents,不覆盖已有文件
+scripts/init-repo.sh ~/repos/myapp  # 给项目加 CLAUDE.md · 闸模板 · 起片配置
+```
+
+在 Claude Code 里装 mod:
+
+```
+/plugin marketplace add AbyssCN/claude-lead-harness
+/plugin install relay@claude-lead-harness
+/plugin install delegate@claude-lead-harness
+/plugin install agent-guard@claude-lead-harness
+/reload-plugins
+```
+
+然后:
+
+1. 在项目目录手动开一次 Claude Code,确认信任目录(不做这步,主管会话会停在确认框)。
+1. 把 `scripts/dev/gate-slice.sh` 改成你项目真实的检查,确认它会红。
+2. 把 [`examples/piw-config.json`](examples/piw-config.json) 拷到 `~/.config/piw/config.json`,填上执行模型。
+3. 按 [`docs/herdr.md`](docs/herdr.md) 配 herdr,在 herdr pane 里开一个 Claude Code,这就是总管。
+4. 对总管说目标。它用 `/goal` 写目标,用 `ticket open` 开单。
+
+```bash
+ticket open --repo myapp --tab 后端 --title "加登录限流" \
+  --origin "登录接口要防爆破" --scope "只动 src/auth" --accept "npm test"
+ticket board
+```
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [分层](docs/architecture.md) | 总管 · 主管 · 执行体,谁跟谁怎么说话,脏场景 |
+| [工作流](docs/workflow.md) | 七段流程,每段标明本仓能不能直接用 |
+| [软件工程纪律](docs/software-engineering.md) | 契约 · 实验 · 切片 · 闸 · 复核 · 权限 · 交接 |
+| [活给谁做](docs/routing.md) | 模型路由 · 先算账 · 复核份数 |
+| [herdr 配置](docs/herdr.md) | 配置 · 截图粘贴 · 约定 |
+| [角色包](docs/role-packs.md) | agent 仓的设计:角色文件夹 · 收集箱 · 晋升检查 |
+| [ROADMAP](ROADMAP.md) | 还没公开的部分 |
 
 ## 里面有什么
 
 | 目录 | 是什么 |
 |---|---|
-| [`mods/relay`](mods/relay) | `/goal 一句话` 写成 GOAL.md,按 RELAY 行自动续跑到验收命令全过或碰到要你拍板的事;上下文到阈值自动写交接、`/clear`、新会话接着做 |
-| [`mods/cue`](mods/cue) | 每次回答后替你写好下一条 prompt,空输入框按 1 写进草稿，从不替你发送;`/enhance` 改写粗稿 |
-| [`mods/delegate`](mods/delegate) | 外部 omd-lite run 的驾驶舱：派活前检查任务书、改动范围、磁盘;run 结束合成一条叫醒;合并后提示该跑的闸 |
-| [`mods/board`](mods/board) | 进度板:`/board` 一屏看 GOAL 完成 / 进行中 / 规划中、待拍板、TODO、roadmap;`/board open` 常驻侧栏，彩色分段进度条，清空后自动重开。纯读文件，不调模型 |
-| [`mods/agent-guard`](mods/agent-guard) | 写代码的子 agent 必须有独立、干净的 worktree |
-| [`mods/prompt-guard`](mods/prompt-guard) | prompt 里的密钥 / 密码拦下并去掉;几分钟内重复发送的同一条丢掉 |
-| [`mods/copy-lint`](mods/copy-lint) | 对外文案写入后按 `.claude/copy-lint.json` 查禁用词和格式，只提示不拦 |
-| [`mods/savvy-progress`](mods/savvy-progress) | fork 自 johnnyvizz/claude-kit(MIT):进度条和子 agent 面板，加上 omd-lite run 跟踪 |
-| [`omd-lite`](omd-lite) | 执行手驱动：建独立 worktree → 执行手按任务书干活 → 按序跑闸 → 失败输出回灌，最多 N 轮;同一道闸连红 3 轮提前停 |
-| [`scripts`](scripts) | 在 VibeTunnel(`vt`)里起 mcode,手机上能看能插话;`mgo` 睡前用 goal 文件起无人值守会话;`omdl-launch.sh` 起 omd-lite run |
-| [`examples`](examples) | 一个真实项目 CLAUDE.md 和执行手 brief 的脱敏版 |
-
-## 安装 mod
-
-```
-/plugin marketplace add AbyssCN/claude-lead-harness
-/plugin install relay@claude-lead-harness
-/plugin install board@claude-lead-harness
-...
-```
-
-装完 `/reload-plugins`。各 mod 的命令和配置项见各自 README;路径类配置都有 `$HOME` 相对的默认值。
-
-## 分工
-
-```
-lead(Claude Opus)   想、拆、写任务书、看 diff、验收
-   │ delegate / omd-lite
-   ▼
-执行手(MiniMax Code)  按任务书写一片代码，在独立 worktree 里
-   │
-   ▼
-闸(tsc · 测试 · lint · 性能预算)  只看退出码;失败输出回灌给执行手再跑
-```
+| [`ticket`](ticket) | 开单、回报、看板,按单拉起主管会话 |
+| [`piw`](piw) | 执行体驱动:建 worktree → 按任务书干活 → 跑闸 → 失败回灌,同一道闸连红 3 轮提前停 |
+| [`skills`](skills) | `/grill` `/contract` `/verify` `/commit` `/retro` `/note` `/investigate` |
+| [`agents`](agents) | `spec-reviewer`:只读对照任务书审 diff |
+| [`herdr`](herdr) | herdr 配置 · tmux 片段 · 重启核对插件 |
+| [`mods/relay`](mods/relay) | `/goal` 写目标,按 RELAY 行续跑到验收全过;到阈值自动交接、`/clear`、新会话接着做 |
+| [`mods/delegate`](mods/delegate) | 起片前查任务书和改动范围,run 结束合成一条叫醒,合并后提示该跑的闸 |
+| [`mods/agent-guard`](mods/agent-guard) | 写代码的子 agent 必须有独立干净的 worktree;可把重命令改写到远端 |
+| [`mods/board`](mods/board) | `/board` 一屏看进度、待拍板和 roadmap,纯读文件 |
+| [`mods/cue`](mods/cue) | 替你写好下一条 prompt 放进草稿,不替你发送 |
+| [`mods/cache-clock`](mods/cache-clock) | 倒数到 prompt cache 变冷,冷发前报价 |
+| [`mods/prompt-guard`](mods/prompt-guard) | prompt 里的密钥拦下去掉;重复发送的丢掉 |
+| [`mods/copy-lint`](mods/copy-lint) | 对外文案查禁用词 |
+| [`mods/savvy-progress`](mods/savvy-progress) | 进度条和子 agent 面板(fork 自 johnnyvizz/claude-kit,MIT) |
+| [`scripts`](scripts) | 安装 · 项目初始化 · 起片 · `send-to-ticket` |
+| [`examples`](examples) | CLAUDE.md · 任务书须知 · 闸模板 · 配置 · 角色包结构 |
 
 几条原则:
 - **不替人按发送键**:cue 只写草稿;relay 自动清空前留 30 秒，你发任何消息就取消。
 - **能读文件就不调模型**:board、retro 都是纯文件读取。
-- **状态放磁盘，不放对话**:GOAL.md、交接文件、run 的 `result.json` 都落盘，对话随时可以清。
+- **状态放磁盘，不放对话**:GOAL.md、交接文件、run 的 `result.json` 都写入磁盘，对话随时可以清。
 - **判据在模型之外**:执行手说"完成了"不算，闸过了才算。
 
 ## 开发
 
 每个 mod:`claude plugin validate mods/<name>`、`claude plugin test mods/<name>`。类型检查用 plugin-authoring skill 带的 `claude-code.d.ts`(在 Claude Code 里加载 plugin-authoring skill 会给出路径)。
 
-omd-lite:`node --test ext/outside.test.ts test/retro-gc.test.mjs`。
+piw:`cd piw && node --test --test-skip-pattern='gc:按名字判活' 'test/**/*.test.mjs'`。ticket:`cd ticket && node --test 'test/*.test.mjs' 'bin/*.test.mjs'`。
+
+`mods` `ticket` `piw` `skills` 由 `scripts/publish/sync.sh` 从私有仓生成,不要手改;改动发 issue 或 PR,维护者回推到源头。公开前闸:`scripts/publish/scrub-check.sh`。
 
 ## License
 

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Prune finished agent-run worktrees: omd-lite (`<repo>/../omdl-<name>`) and myapp-agents/*.
+# Each one is a full checkout (~1 GB; node_modules is cp -al hardlinked) and nothing ever
+# removed them — 10.08 they filled D: (WSL vhdx) and the filesystem went read-only.
+# Removes ONLY: no live process cwd inside · no uncommitted changes · idle >= AGENT_GC_AGE_DAYS.
+# The branch is KEPT (work stays reviewable/mergeable); only the checkout goes.
+# Also prunes dangling Docker images, anonymous volumes and build cache.
+set -uo pipefail
+
+AGE_DAYS="${AGENT_GC_AGE_DAYS:-2}"
+REPOS_ROOT="${AGENT_GC_ROOT:-/home/user/repos}"
+NOW=$(date +%s)
+log() { printf '%s %s\n' "$(date -Is)" "$*"; }
+
+declare -A CWD
+for p in /proc/[0-9]*; do
+  c=$(readlink "$p/cwd" 2>/dev/null) || continue
+  [ -n "$c" ] && CWD["$c"]=1
+done
+proc_inside() { local d="$1" k; for k in "${!CWD[@]}"; do case "$k" in "$d"|"$d"/*) return 0;; esac; done; return 1; }
+
+log "=== agent-worktree GC start (age>=${AGE_DAYS}d, root=${REPOS_ROOT}) ==="
+removed=0; kept=0
+for base in "$REPOS_ROOT"/*/; do
+  base=${base%/}
+  [ -d "$base/.git" ] || continue   # primary checkouts only (worktrees have a .git file)
+  MAIN=$(git -C "$base" symbolic-ref -q --short HEAD) || continue
+  while read -r wt; do
+    [ -d "$wt" ] || continue
+    id="$(basename "$base"):${wt#"$REPOS_ROOT"/}"
+    keep() { log "kept $id — $1"; kept=$((kept+1)); }
+    if proc_inside "$wt"; then keep "有进程占用"; continue; fi
+    # 未提交改动永远先判、永远保留(10.08 教训:曾把这道放在「已合并」之后,删掉了 3 个有未提交改动的 worktree)
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)
+    [ "$dirty" -eq 0 ] || { keep "未提交改动 dirty=$dirty"; continue; }
+    # 已合进主线(HEAD 是 main 的祖先)→ 不等年龄,立即删 worktree + 删已合并分支(git branch -d 只删已合并的)
+    # 例外:agent-wt.sh 刚建、还没提交过(HEAD = 建点 sha)的不是「已合并」,是「还没开工」—— 走下面的年龄规则
+    # (12.10:13:01 这一轮把刚派出去的 myapp-agents/goal1012-d2-modal-impl 当已合并删了,子 agent 读到一半目录没了)。
+    br=$(git -C "$wt" symbolic-ref -q --short HEAD)
+    born=$(sed -n 's/^sha=//p' "$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)/agent-wt" 2>/dev/null)
+    if [ -n "$br" ] && [ "$born" != "$(git -C "$wt" rev-parse HEAD)" ] && [ "$br" != "$MAIN" ] && git -C "$base" merge-base --is-ancestor "$(git -C "$wt" rev-parse HEAD)" "$MAIN" 2>/dev/null; then
+      if git -C "$base" worktree remove "$wt" 2>/dev/null; then
+        git -C "$base" branch -d "$br" >/dev/null 2>&1
+        log "removed $id merged into $MAIN (branch $br deleted)"; removed=$((removed+1))
+      else
+        log "FAILED remove $id"
+      fi
+      continue
+    fi
+    name=$(basename "$wt")
+    if [[ $name == omdl-* ]] && [ ! -f "$HOME/.omd-lite/runs/${name#omdl-}/result.json" ]; then
+      keep "omd-lite run 未结束(无 result.json)"; continue
+    fi
+    # 活跃度: 目录 mtime 与该 worktree 的 index mtime 取较新者
+    gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
+    mt=$(stat -c %Y "$wt" "$gd/index" 2>/dev/null | sort -n | tail -1)
+    age=$(( (NOW - ${mt:-$NOW}) / 86400 ))
+    [ "$age" -ge "$AGE_DAYS" ] || { keep "未到年龄 age=${age}d"; continue; }
+    if git -C "$base" worktree remove "$wt" 2>/dev/null; then
+      log "removed $id age=${age}d (branch kept)"; removed=$((removed+1))
+    else
+      log "FAILED remove $id"
+    fi
+  done < <(git -C "$base" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' \
+             | grep -E "^${REPOS_ROOT}/(omdl-[^/]+|myapp-agents/[^/]+)$")
+  git -C "$base" worktree prune 2>/dev/null
+done
+log "=== worktree GC done: removed=${removed} kept=${kept} ==="
+
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  docker image prune -f 2>&1 | tail -1 | sed "s/^/$(date -Is) docker images: /"
+  docker volume prune -f 2>&1 | tail -1 | sed "s/^/$(date -Is) docker anon volumes: /"
+  docker builder prune -f --filter until=168h 2>&1 | tail -1 | sed "s/^/$(date -Is) docker build cache: /"
+fi
+log "disk: $(df -h / | tail -1)"

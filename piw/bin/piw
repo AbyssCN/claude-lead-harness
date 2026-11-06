@@ -1,0 +1,1636 @@
+#!/usr/bin/env node
+// piw(原 omd-lite;bin/omd-lite 是指向本文件的软链,旧名字照常可用):在隔离 worktree 里用 pi 跑一个任务书,闸在模型之外(ext/gate-loop.ts)。
+// 用法见 README.md。只依赖 node 标准库。
+"use strict";
+const { spawnSync, spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const piw = require("../lib/piw");
+// lib/*.mjs 是 ESM。CJS 里 require 一个正在被别的线程动态 import 的 ESM 文件会炸:
+// ERR_INTERNAL_ASSERTION "Cannot require() ES Module … because it is not yet fully loaded"。
+// node --test 跑全量时正好撞上(测试里 await import('../lib/slot-queue.mjs') 与别处 require 本文件同时发生),
+// 报成整轮 test 失败。所以改成用的时候再 require:模块加载期不碰 ESM,竞态消失,调用点写法不变。
+const esmCache = new Map();
+const esmFn = (file, name) => (...args) => {
+  if (!esmCache.has(file)) esmCache.set(file, require(file));
+  return esmCache.get(file)[name](...args);
+};
+// 任务书解析只有一个实现(F1):lib/brief.mjs 是 factory/lib/brief.mjs 的逐字副本,piw 不再自带一份正则
+const allowedList = esmFn("../lib/brief.mjs", "allowedList");
+// 工厂事件流(F2):一行一事件,只追加;lib/events.mjs 是 factory 侧的逐字副本,本文件只调它
+const appendEvent = esmFn("../lib/events.mjs", "appendEvent");
+const importGateEvents = esmFn("../lib/gate-events.mjs", "importGateEvents");
+const lastActivity = esmFn("../lib/slot-queue.mjs", "lastActivity");
+const classOfResult = esmFn("../lib/round-classify.mjs", "classOfResult");
+
+const ROOT = path.resolve(__dirname, "..");
+const RUNS = path.join(os.homedir(), ".omd-lite", "runs");
+// 环境变量双读:PIW_X ?? OMD_LITE_X(新名优先,旧名兜底)。写出给子进程的变量两个名字都写,OMD_LITE_OUT 必须保留
+// (myapp scripts/dev/_untrusted.sh 用它判断不受信 agent)。
+const envv = (name, env = process.env) => env[`PIW_${name}`] ?? env[`OMD_LITE_${name}`];
+const ENV_FILE = envv("ENV_FILE") || path.join(os.homedir(), ".config", "piw", "provider.env");
+// 主模型因供应商报错中途停下(闸一轮没判)时，在同一 worktree 换它重跑一次。03.10 实测两种:429 额度上限(2056)· 流中途断开
+const DEFAULT_FALLBACK = "deepseek/deepseek-v4-flash";
+// 预算闸默认值(26.10,otherapp docs/plan/10.26/token-yield.md H3):全价口径累计 token;10-23 起闸绿片 p90 ≈ 25M。--token-budget 0 = 不限
+const DEFAULT_TOKEN_BUDGET = 25e6;
+// gate-loop 闸在跑时写在 run 目录的标记(ext/gate-loop.ts GATE_RUNNING):墙钟见它暂停
+const GATE_RUNNING = "gate-running";
+const USAGE = `用法:
+  piw run --repo <path> --base <ref> --spec <仓内路径> --model <provider/id[:thinking]>
+               --prompt <minimal|omd-leaf|<文件>> --gate "<cmd>" [--gate ...] --name <label>
+               [--no-context] [--max-rounds 3] [--wall 3600] [--fallback-model <provider/id>|none]
+               [--token-budget 25000000]   本片累计 token(全价口径)到上限就叫执行体收尾、跑一次闸给结论;0 = 不限(env PIW_TOKEN_BUDGET 同义)
+                                       墙钟只计执行体时间,闸在跑时暂停
+               [--red-check "<cmd>"]   开跑前在 base 上跑一次,必须失败(判据自证);绿了就不开跑
+               [--executor pi|mcode|claude|agy|codex]   默认 pi;mcode = MiniMax Code(mcode exec,只为配音 / 出图 / 出视频);claude = claude -p(--model 如 haiku);
+                                       agy = Antigravity 的 agy -p(--model 如 gemini-3.8-flash-high,agy models 列全);
+                                       codex = OpenAI 的 codex exec(沙箱 workspace-write + 开网络,--model 如 gpt-5-codex)。
+                                       MiniMax 一律 high(pi --thinking / mcode --effort)。四种执行器的进度都同时打到终端 ——
+                                       用 \`vt piw run …\` 启动即可在 VibeTunnel 里看
+               [--role <worker|…>]   模型来自角色表(~/.config/piw/config.json):chain[0] 作 --model、chain[1] 作 --fallback-model;
+                                       显式给的 --model / --fallback-model 优先。冷却中的坐标自动跳过
+               [--skip-coord <coord>] 可重复;从角色表展开的 chain 里剔除这些坐标(重派用,需要 --role)
+               [--dry-run]           只打印解析后的 chain / pi 路径 / argv / 密钥注入情况,exit 0;不建 worktree、不调模型
+               [--models-json <file>]      执行臂换一份 models.json(这片自己的 PI_CODING_AGENT_DIR,不碰全局)
+               [--reuse-worktree <path>]   不新建 worktree,在已有 worktree 里续跑(meta.json 记 resumedFrom)
+               [--exec-wrapper <脚本>]  执行体一律经它起:\`<脚本> <worktree> -- <原命令…>\`(myapp:scripts/dev/sandbox-exec.sh,bwrap 沙箱);
+                                       pi / mcode / claude / agy / codex 五条臂与非 pi 臂的闸同一前缀;wrapper 从 PIW_EXECUTOR / PIW_MODEL / SANDBOX_ENV_PASS 选臂与凭证
+  piw ask --role <role> [--system <文件>] [--user <文件>|stdin] [--repo <path>] [--read-tools] [--dry-run]
+                                       单轮、无工具、临时空 cwd 调 pi(--read-tools:只开 read/grep/find/ls,cwd = --repo);按角色表 chain 备用,额度类写冷却。
+                                       退出码 0 成功 · 2 chain 用完(stderr 末行 PIW_FAIL <class> <coord>)· 3 请求错误(不换坐标)
+  piw agent [claude -p 的参数…]        claude -p 的替身(无人值守 cron 用;bin/piw-p 是它的入口):执行体 = pi,模型 = 角色 cron(PIW_ROLE 可换)。
+                                       认 -p · 位置参数或 stdin 提示词 · --output-format text|json|stream-json · --allowedTools / --disallowedTools
+                                       (Bash(<前缀>:*) 由 ext/agent-guard.ts 守)· --agent <名>(读 .claude/agents/<名>.md)· --append-system-prompt · --max-turns;
+                                       其余 claude 专有参数忽略并在 stderr 列出;MCP 不开。调用方名 = PIW_CALLER(缺省 -n / --agent / cwd 目录名)。
+                                       每次进台账 label agent:<调用方>;每个调用方每天上限 config.agentCaps(缺省 24 次),超了不起模型,stderr PIW_CAP。
+  piw cron-report [--day YYYY-MM-DD] [--out <文件>] [--mail]   无人值守任务日报(HTML):各调用方次数 / token / 成败 / 上限 · 还在走 Claude 的会话 · DeepSeek 元 · 效果读数
+  piw report <label>...
+  piw yield [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <仓目录名>] [--json]   MiniMax token 换成了多少闸绿的片(按起片日):无闸结论占比 · 每片闸绿的 token;默认近 7 天;只读
+  piw daily [--day YYYY-MM-DD] [--json]   一天的 DeepSeek 元(按调用方)· 余额实扣对账(差 > 5% 标红)· continuity MiniMax 成功率 · 降级率 · 连续 3 天判据;只读
+  piw mem-sample                       追加一行容量采样到 ~/.omd-lite/mem-samples.tsv(PIW_MEM_SAMPLES):epoch · MemAvailable kB · 被占 run 槽数;piw-mem-sample.timer 每分钟跑
+  piw balance                          查 DeepSeek 账户余额(GET /user/balance),追加一行到 ~/.omd-lite/balance/<本地日>.jsonl(PIW_BALANCE_DIR);piw-balance.timer 每小时跑
+  稀疏检出:默认不检出 ${"docs/design/reviews · _shots-* · docs/reviews · docs/research"}(任务书 / 脚本点名的子目录自动加回);
+    --sparse-exclude "a,b" 或 PIW_SPARSE_EXCLUDE(旧名 OMD_LITE_SPARSE_EXCLUDE 仍认)换清单,--full 关掉;piw sparse-plan --repo R --base B --spec S 只看计划
+  piw clean <label>          删除该 run 的 worktree 与分支(保留 ~/.omd-lite/runs/<label>)
+  piw retro [--since YYYY-MM-DD] [label…]   批后复盘:逐 run 表 + 聚合(只列 ≥ 2 个 run 的模式),纯读 runs 目录
+  piw gc [--older-than <天>=2] [--apply]     列出可清的 run worktree / 分支(默认只预览;run 记录保留)`;
+
+const die = (m) => { console.error(m); process.exit(2); };
+const git = (cwd, ...args) => {
+  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  if (r.status !== 0) die(`git ${args.join(" ")} 失败:\n${r.stderr}`);
+  return r.stdout;
+};
+
+function parseArgs(argv) {
+  const o = { gate: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--no-context") { o.noContext = true; continue; }
+    if (a === "--full") { o.full = true; continue; }
+    if (a === "--dry-run") { o.dry_run = true; continue; }
+    if (a === "--read-tools") { o.read_tools = true; continue; }
+    if (!a.startsWith("--")) die(`多余参数: ${a}\n${USAGE}`);
+    const k = a.slice(2), v = argv[++i];
+    if (v === undefined) die(`${a} 缺值`);
+    if (k === "gate") o.gate.push(v);
+    else if (k === "skip-coord") (o.skip_coord ??= []).push(v);
+    else o[k.replace(/-/g, "_")] = v;
+  }
+  // 任务书给成仓内的绝对路径:换成相对仓根,worktree 里才找得到(24.10 mr3 给绝对路径被拒「worktree 里没有任务书」)
+  if (o.spec && o.repo && path.isAbsolute(o.spec)) {
+    const rel = path.relative(path.resolve(o.repo), o.spec);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) o.spec = rel;
+  }
+  return o;
+}
+
+// 提示词文件开头的 <!-- … --> 是给人看的出处说明,不进 system prompt
+function loadPrompt(arm) {
+  const f = fs.existsSync(path.join(ROOT, "prompts", `${arm}.md`)) ? path.join(ROOT, "prompts", `${arm}.md`) : path.resolve(arm);
+  if (!fs.existsSync(f)) die(`找不到提示词臂: ${arm}`);
+  return { file: f, text: fs.readFileSync(f, "utf8").replace(/^\s*<!--[\s\S]*?-->\s*/, "") };
+}
+
+// 把仓库现有的 node_modules 硬链接复制进 worktree(免 npm install;cp 失败才退回绝对路径软链)
+function linkNodeModules(repo, wt) {
+  const cands = ["node_modules"];
+  for (const d of ["apps", "packages", "services"]) {
+    const p = path.join(repo, d);
+    if (fs.existsSync(p)) for (const s of fs.readdirSync(p)) cands.push(path.join(d, s, "node_modules"));
+  }
+  const linked = [];
+  for (const rel of cands) {
+    const src = path.join(repo, rel), dst = path.join(wt, rel);
+    if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dst)) || fs.existsSync(dst)) continue;
+    // 硬链接复制(cp -al)而不是软链:node_modules/@myapp/* 是相对软链,整目录软链时它们解析回主仓库的源码,
+    // worktree 里改的 packages/* 测不到(02.10 引擎 slice 三组第 1 轮全因此误红)。硬链接复制约 4 s,不占额外空间。
+    const r = spawnSync("cp", ["-al", src, dst]);
+    if (r.status !== 0) { fs.symlinkSync(src, dst); linked.push(rel + "(symlink 兜底)"); continue; }
+    linked.push(rel);
+  }
+  // 仓根的 Python venv(如 myapp 的 .venv-solver)软链过去:没有它求解器测试 skipIf 静默跳过(myapp 10.8 W5 复核)。
+  for (const n of fs.readdirSync(repo)) {
+    if (!n.startsWith(".venv")) continue;
+    const dst = path.join(wt, n);
+    if (fs.existsSync(dst)) continue;
+    fs.symlinkSync(path.join(repo, n), dst);
+    linked.push(n);
+  }
+  return linked;
+}
+
+function usageFromJsonl(file) {
+  const u = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, assistant_messages: 0 };
+  if (!fs.existsSync(file)) return u;
+  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+    if (!line.includes('"message_end"')) continue;
+    let e; try { e = JSON.parse(line); } catch { continue; }
+    const m = e.message;
+    if (e.type !== "message_end" || m?.role !== "assistant" || !m.usage) continue;
+    u.assistant_messages++;
+    u.input += m.usage.input || 0; u.output += m.usage.output || 0;
+    u.cacheRead += m.usage.cacheRead || 0; u.cacheWrite += m.usage.cacheWrite || 0;
+    u.total += m.usage.totalTokens || 0; u.cost += m.usage.cost?.total || 0;
+  }
+  return u;
+}
+
+// 台账:一次 pi 尝试一行(主跑与 fallback 各一行),行里的 tokens 就是上面这几个字段。
+// 写不进去只报一行 —— 台账是账本,不是闸,不该让一次 run 因为目录只读而挂掉。
+function recordUsage(env, o, { model, arm, dir }) {
+  const t = usageFromJsonl(path.join(dir, "pi.jsonl"));
+  const row = { at: Math.floor(Date.now() / 1000), label: o.name, model, arm,
+    tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite, total: t.total } };
+  try { piw.appendUsage(env, row); }
+  catch (e) { console.error(`[piw] 用量台账写不进 ${piw.usageDir(env)}:${e.message}`); }
+}
+
+// --role:从角色表展开 chain(剔除 --skip-coord 与冷却中的坐标)。chain[0] → --model,chain[1] → --fallback-model;显式给的优先
+function resolveRoleModels(o) {
+  if (o.skip_coord && !o.role) die("--skip-coord 需要 --role");
+  if (!o.role) return null;
+  const cfg = piw.loadConfig({ repo: o.repo ? path.resolve(o.repo) : undefined });
+  let x;
+  try { x = piw.expandChain(o.role, cfg, { skip: o.skip_coord }); } catch (e) { die(e.message); }
+  if (!x.chain.length) die(`角色 ${o.role} 已无可用坐标(冷却中: ${x.cooling.join(", ") || "无"};--skip-coord: ${x.skipped.join(", ") || "无"})`);
+  // 角色表的坐标是 pi 的(provider/model);mcode 只认它自己会话里的模型,传过去启动即失败(10-19 起 33 片「not in this Session's model list」)→ 用 mcode 自带默认
+  if (o.executor === "mcode") { o.model ??= "default"; o.fallback_model ??= "none"; return { cfg, ...x }; }
+  o.model ??= x.chain[0];
+  o.fallback_model ??= x.chain[1] ?? "none";
+  return { cfg, ...x };
+}
+
+// 续跑 / 换模型重跑时给执行者的提示:先看清已有改动
+const RESUME_NOTE = "上一个执行者因供应商报错中途停下，worktree 里可能已有它的部分改动：先 git status / git diff 看清，再接着做完。";
+
+// 已有 worktree 属于哪个 run(--reuse-worktree 的 resumedFrom):先按 meta.worktree 找,找不到按 omdl-<label> 目录名推
+function labelOfWorktree(wt) {
+  if (fs.existsSync(RUNS)) {
+    const hits = fs.readdirSync(RUNS).map((l) => { let m = null; try { m = readMeta(l); } catch {}
+      return m && path.resolve(m.worktree || "") === wt ? { l, t: m.start_epoch || 0 } : null; })
+      .filter(Boolean).sort((a, b) => b.t - a.t);
+    if (hits.length) return hits[0].l;
+  }
+  const m = path.basename(wt).match(/^omdl-(.+)$/);
+  return m ? m[1] : null;
+}
+
+// 起片进程在 worktree add 之后、run 目录建好之前被杀,会留下 omdl/<label> 空分支,之后同名 run 永远建不了分支。
+// 没提交、没 run 记录、没进程在里面才清;清之前整棵工作区(含未跟踪文件)原样存成 refs/piw-orphan/ 下的提交,人手改过的也找得回。
+// 证明不了没人在用(读不了某个自己进程的 cwd、/proc 看不全)就不删:HEAD 分离后整个目录挪到 <worktree>.orphan-<时间>,
+// 在里面的 shell 跟着 inode 走、改动原地还在;挪开的目录不自动清,gc 单列、人手删
+function clearOrphanBranch(repo, branch, baseSha, wtPath, label) {
+  const ref = `refs/heads/${branch}`;
+  if (spawnSync("git", ["-C", repo, "show-ref", "--verify", "-q", ref]).status !== 0) return;
+  const no = (why) => console.error(`piw: 不清 ${branch}:${why}`);
+  if (git(repo, "rev-list", "--count", ref, "--not", baseSha, `--exclude=${branch}`, "--branches").trim() !== "0") return no("分支上有自己的提交");
+  const wt = git(repo, "worktree", "list", "--porcelain").split("\n\n")
+    .find((b) => b.split("\n").includes(`branch ${ref}`))?.match(/^worktree (.+)$/m)?.[1];
+  if (fs.existsSync(wtPath) && !(wt && fs.existsSync(wt) && fs.realpathSync(wt) === fs.realpathSync(wtPath)))
+    return no(`${wtPath} 已存在,但不是这个分支的 worktree(detached 或别的分支),要人看`);
+  const used = new Set([wtPath, wt].filter(Boolean).map((p) => path.resolve(p)));
+  if (runLabels().some((l) => { try { return used.has(path.resolve(readMeta(l)?.worktree || "")); } catch { return true; } }))
+    return no("有 run 记录指向这个 worktree");
+  let note = "";
+  if (wt && fs.existsSync(wt)) {
+    const procs = procBlocker(wt);
+    if (procs?.busy) return no(procs.busy);
+    const arc = archiveWorktree(wt, ref, label);
+    if (!arc) return no("存档失败");
+    note = `(原样存档 ${arc.name}${arc.ignored ? `;忽略文件未存:${arc.ignored.split("\n").join(" ")}` : ""})`;
+    if (procs?.unsure) {
+      const aside = `${wt}.orphan-${arc.stamp}`;
+      const tip = git(wt, "rev-parse", "HEAD").trim();
+      const mv = spawnSync("git", ["-C", repo, "worktree", "move", wt, aside], { encoding: "utf8" });
+      if (mv.status !== 0) return no(`${procs.unsure};挪开失败:${mv.stderr.trim()}`);
+      const det = spawnSync("git", ["-C", aside, "update-ref", "--no-deref", "HEAD", tip], { encoding: "utf8" });
+      if (det.status !== 0) return no(`${procs.unsure};已挪到 ${aside},HEAD 分离失败(${det.stderr.trim()}),分支没删`);
+      console.error(`piw: 证明不了没人在用 ${wt}(${procs.unsure}),挪到 ${aside}(HEAD 已分离,不自动清;piw gc 列出,人手删)`);
+    } else git(repo, "worktree", "remove", "--force", wt);
+  } else if (wt) git(repo, "worktree", "prune");
+  git(repo, "branch", "-D", branch);
+  console.error(`piw: 清掉上次被杀留下的空分支 ${branch}${note}`);
+}
+
+// 别人的进程(root 等)读不了 cwd 是常态,跳过;/proc 挂了 hidepid 看不全,不清。
+// 自己的活进程 cwd 读不了(不可 dump:手开的 shell 进了沙箱、gpg-agent、systemd --user)就证明不了它不在 worktree 里,不清;命令行不提路径不算证明
+function procBlocker(wt) {
+  const root = envv("PROC_ROOT") || "/proc";
+  let mounts = "";
+  try { mounts = fs.readFileSync(path.join(root, "mounts"), "utf8"); } catch {}
+  if (/[\s,]hidepid=(?!0\b|off\b)/.test(mounts) || !fs.existsSync(path.join(root, "1"))) return { unsure: `${root} 挂了 hidepid,看不全进程` };
+  let unknown = null;
+  let pids;
+  try { pids = fs.readdirSync(root).filter((p) => /^\d+$/.test(p)); } catch (e) { return { unsure: `读不了 ${root}(${e.code})` }; }
+  for (const p of pids) {
+    let c;
+    try { c = fs.readlinkSync(path.join(root, p, "cwd")); } catch (e) {
+      if (e.code === "ENOENT" || unknown) continue;
+      let uid = null;
+      try { uid = fs.statSync(path.join(root, p)).uid; } catch {}
+      if (uid !== null && uid !== process.getuid()) continue;
+      let status = "";
+      try { status = fs.readFileSync(path.join(root, p, "status"), "utf8"); } catch {}
+      if (/^State:\s+Z/m.test(status)) continue;
+      unknown = `读不了自己的进程 ${p} 的 cwd(${e.code}),证明不了它不在 worktree 里`;
+      continue;
+    }
+    if (c === wt || c.startsWith(wt + "/")) return { busy: `进程 ${p} 的 cwd 在 worktree 里` };
+  }
+  return unknown && { unsure: unknown };
+}
+
+function archiveWorktree(wt, ref, label) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "piw-orphan-"));
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(tmp, "index"), GIT_AUTHOR_NAME: "piw", GIT_AUTHOR_EMAIL: "piw@localhost",
+    GIT_COMMITTER_NAME: "piw", GIT_COMMITTER_EMAIL: "piw@localhost" };
+  const g = (...a) => {
+    const r = spawnSync("git", ["-C", wt, ...a], { env, encoding: "utf8", maxBuffer: 1 << 28 });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout.trim();
+  };
+  try {
+    // 从 worktree 自己的 index 起步:删除 / 改名照记,稀疏排除的条目带 skip-worktree 不算删;
+    // index 为空(检出前被杀)说明什么都没检出过,按分支 tip 起步、缺的文件不算删
+    const own = path.resolve(wt, git(wt, "rev-parse", "--git-path", "index").trim());
+    const head = fs.existsSync(own) ? fs.readFileSync(own) : Buffer.alloc(0);
+    const checkedOut = head.length >= 12 && head.readUInt32BE(8) > 0;
+    if (checkedOut) fs.copyFileSync(own, env.GIT_INDEX_FILE); else g("read-tree", ref);
+    g("add", "--sparse", ...(checkedOut ? ["-A"] : ["--ignore-removal"]), ".");
+    const ignored = g("ls-files", "-o", "-i", "--exclude-standard", "--directory");
+    const sha = g("commit-tree", g("write-tree"), "-p", ref, "-m", `piw: ${label} 起片被杀留下的 worktree 原样存档`);
+    const stamp = new Date().toISOString().replace(/[-:]|\.\d+/g, "");
+    const name = `refs/piw-orphan/${label}-${stamp}`;
+    g("update-ref", name, sha);
+    return { name, ignored, stamp };
+  } catch (e) { console.error(`piw: 存档 ${wt} 失败:${e.message.trim()}`); return null; }
+  finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+
+// 同名 label 起片互斥:flock 子进程持锁,本进程退出或放锁时它的 stdin 关掉,锁随之释放
+async function launchLock(label) {
+  fs.mkdirSync(RUNS, { recursive: true });
+  const p = spawn("flock", ["-n", path.join(RUNS, `.${label}.launch.lock`), "sh", "-c", "echo ok; exec cat >/dev/null"],
+    { stdio: ["pipe", "pipe", "inherit"] });
+  const ok = await new Promise((res) => { p.stdout.once("data", () => res(true)); p.once("exit", () => res(false)); p.once("error", () => res(false)); });
+  if (!ok) die(`piw: label ${label} 正在起片(另一个 piw run 持有 ${RUNS}/.${label}.launch.lock),不重复起`);
+  return () => p.stdin.end();
+}
+
+// --dry-run:只打印解析结果,不建 worktree、不调模型、不读密钥值
+function runDry(o, rm) {
+  const cfg = rm?.cfg ?? piw.loadConfig({ repo: o.repo ? path.resolve(o.repo) : undefined });
+  const pi = piw.resolvePi(cfg);
+  const lines = ["[dry-run] omd-lite run(不建 worktree、不调模型)"];
+  if (o.role) {
+    lines.push(`role: ${o.role}(配置: ${cfg.source})`,
+      `chain(展开后可用): ${rm.chain.join("  →  ") || "(空)"}`,
+      `chain(角色表原样): ${rm.full.join("  →  ")}`,
+      `冷却中跳过: ${rm.cooling.join(", ") || "无"}`, `--skip-coord 剔除: ${rm.skipped.join(", ") || "无"}`);
+  }
+  if (!o.model) die("--dry-run 也需要 --model 或 --role");
+  const fallback = o.fallback_model === "none" ? null : o.fallback_model || DEFAULT_FALLBACK;
+  lines.push(`--model: ${o.model}`, `--fallback-model: ${fallback ?? "none"}`, `pi: ${pi.bin ?? "(未找到)"}(${pi.via})`,
+    `exec-wrapper: ${o.exec_wrapper ? path.resolve(o.exec_wrapper) : "无(执行体裸起)"}`);
+  const specTask = `按任务书 ${o.spec || "<spec>"} 完成工作。先读任务书。`;
+  const arm = o.prompt || "minimal";
+  if (["claude", "agy", "codex"].includes(o.executor)) {
+    // 非 pi 执行器:闸循环每轮起一次 CLI,这里只打印第 1 轮的 argv(系统提示词臂的正文并进第一轮提示词,见 runMcode)
+    const argv = o.executor === "agy"
+      ? [...(o.model ? ["--model", o.model] : []), "--dangerously-skip-permissions", "--output-format", "text", "-p", `<提示词臂 ${arm} + ${specTask}>`]
+      : o.executor === "codex"
+        ? codexArgs({ wt: "<worktree>", dir: "<run 目录>", round: 1, model: o.model === "default" ? null : o.model, text: `<提示词臂 ${arm} + ${specTask}>` })
+        : ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--setting-sources", "project,local", "--strict-mcp-config", ...(o.model ? ["--model", o.model] : []), `<提示词臂 ${arm} + ${specTask}>`];
+    lines.push(`executor: ${o.executor}`, `argv(第 1 轮): timeout ${o.wall || 3600} ${o.executor} ${argv.map((a) => JSON.stringify(a)).join(" ")}`,
+      `worktree: ${o.reuse_worktree ? `复用 ${path.resolve(o.reuse_worktree)}` : "不创建"}`);
+    console.log(lines.join("\n"));
+    return;
+  }
+  for (const [i, model] of [o.model, ...(fallback && fallback !== o.model ? [fallback] : [])].entries()) {
+    const argv = piRunArgs({ o, model, systemPrompt: `<提示词臂 ${arm}>`, task: i ? `${specTask}${RESUME_NOTE}` : specTask, sessionDir: "<run 目录>/session" });
+    lines.push(`argv(${i ? "fallback" : "主跑"}): timeout ${o.wall || 3600} ${pi.bin ?? "pi"} ${argv.map((a) => JSON.stringify(a)).join(" ")}`);
+    const kv = providerKeyVar(model, { peek: true });
+    lines.push(`env 注入(${i ? "fallback" : "主跑"}): ${kv ? `$${kv} ← ${ENV_FILE}(只注入这一个变量,dry-run 不读值)` : "无(models.json 无 $VAR 引用;auth.json 是否有该供应商凭证 dry-run 不查)"};PIW_OUT=OMD_LITE_OUT=<run 目录>`);
+  }
+  lines.push(`worktree: ${o.reuse_worktree ? `复用 ${path.resolve(o.reuse_worktree)}(不 git worktree add)` : "不创建"}`);
+  console.log(lines.join("\n"));
+}
+
+async function run(o) {
+  const rm = resolveRoleModels(o);
+  if (o.dry_run) return runDry(o, rm);
+  for (const k of ["repo", "base", "spec", "model", "prompt", "name"]) if (!o[k]) die(`缺 --${k}${k === "model" ? "(或 --role)" : ""}\n${USAGE}`);
+  if (!o.gate.length) die("至少一个 --gate");
+  if (!/^[\w.-]+$/.test(o.name)) die("--name 只许字母数字 . _ -");
+  const repo = path.resolve(o.repo);
+  const out = path.join(RUNS, o.name);
+  const unlock = await launchLock(o.name);
+  if (fs.existsSync(out)) die(`已存在 ${out}(换 --name 或先删)`);
+  const prompt = loadPrompt(o.prompt);
+  const baseSha = git(repo, "rev-parse", `${o.base}^{commit}`).trim();
+  // --reuse-worktree:不 git worktree add、不稀疏检出,在已有 worktree 里续跑(G-3)
+  const reuse = o.reuse_worktree ? path.resolve(o.reuse_worktree) : null;
+  // 20.10:片收尾时 worktree 已归档删掉(claude-mods factory/dev/wt-reap.mjs),续跑前先从归档还原
+  if (reuse && !fs.existsSync(reuse)) {
+    const l = labelOfWorktree(reuse);
+    const reaper = process.env.PIW_WT_REAP || path.join(os.homedir(), "repos", "claude-mods", "factory", "dev", "wt-reap.mjs");
+    if (l && fs.existsSync(reaper)) spawnSync(process.execPath, [reaper, "--ensure", l], { stdio: "inherit", env: { ...process.env, OMDL_RUNS: RUNS } });
+  }
+  if (reuse && !fs.existsSync(path.join(reuse, ".git"))) die(`--reuse-worktree ${reuse} 不是 git worktree`);
+  const wt = reuse || path.resolve(repo, "..", `omdl-${o.name}`);
+  const branch = reuse ? git(wt, "rev-parse", "--abbrev-ref", "HEAD").trim() : `omdl/${o.name}`;
+  const resumedFrom = reuse ? labelOfWorktree(reuse) : null;
+  // 稀疏检出:存档类大目录(旧评审截图、调研)不检出,每个 worktree 省约 0.4 GB;--full 关掉
+  const sparse = o.full || reuse ? null : sparsePlan(repo, baseSha, o.spec, o.sparse_exclude ?? envv("SPARSE_EXCLUDE") ?? SPARSE_DEFAULT);
+  // 盘线钩子(20.10):调用方用 PIW_DISK_GUARD 给一条命令,worktree 路径追加在末尾;非 0 就不建 worktree、不起
+  const guard = !reuse && process.env.PIW_DISK_GUARD;
+  if (guard) {
+    const g = spawnSync("sh", ["-c", `${guard} "$1"`, "piw", wt], { stdio: ["ignore", "inherit", "pipe"], encoding: "utf8", timeout: 120e3 });
+    if (g.status !== 0) {
+      process.stderr.write(g.stderr || "");
+      fs.mkdirSync(out, { recursive: true });
+      const disk_guard = { cmd: guard, exit: g.status, ...(g.status == null ? { why: g.error?.code || g.signal } : {}), stderr: (g.stderr || "").trim() };
+      fs.writeFileSync(path.join(out, "meta.json"), JSON.stringify({ label: o.name, repo, base: o.base, base_sha: baseSha, worktree: null, spec: o.spec, failureClass: "disk", disk_guard }, null, 2) + "\n");
+      fs.writeFileSync(path.join(out, "result.json"), JSON.stringify({ gates: "not-run", error: "disk-guard", failureClass: "disk" }) + "\n");
+      die(`盘线拒起(PIW_DISK_GUARD ${g.status == null ? `没跑完:${disk_guard.why}` : `退 ${g.status}`}),没建 worktree ${wt}`);
+    }
+  }
+  if (!reuse) clearOrphanBranch(repo, branch, baseSha, wt, o.name);
+  if (reuse) { /* 已有 worktree,不动 */ }
+  else if (sparse) {
+    git(repo, "worktree", "add", "--no-checkout", wt, "-b", branch, baseSha);
+    git(wt, "sparse-checkout", "set", "--no-cone", ...sparsePatterns(sparse));
+    git(wt, "checkout", "-q");
+  } else git(repo, "worktree", "add", wt, "-b", branch, baseSha);
+  fs.mkdirSync(out, { recursive: true });
+  const meta = {
+    label: o.name, model: o.model, prompt_arm: o.prompt, prompt_file: prompt.file, context: !o.noContext,
+    repo, base: o.base, base_sha: baseSha, worktree: wt, branch, spec: o.spec, gates: o.gate,
+    max_rounds: Number(o.max_rounds || 3), sparse,
+    token_budget: Number(o.token_budget ?? process.env.PIW_TOKEN_BUDGET ?? DEFAULT_TOKEN_BUDGET),
+    ...(o.role ? { role: o.role } : {}), ...(reuse ? { resumedFrom, reused_worktree: true } : {}),
+    executor: o.executor || "pi",
+    // 嵌套在哪个 Claude Code 会话里启动(进度 mod 只显示本会话的 run);driver_pid 判活
+    claude_session: process.env.CLAUDE_CODE_SESSION_ID || null, driver_pid: process.pid,
+  };
+  // 先写一份,中途失败时 clean 也找得到 worktree
+  const metaFile = path.join(out, "meta.json");
+  fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + "\n");
+  unlock();
+  appendEvent({ repo: meta.repo, run: meta.label, phase: "launch", status: "start", actor: meta.executor, evidence: metaFile, model: meta.model, spec: meta.spec });
+  if (!fs.existsSync(path.join(wt, o.spec))) die(`worktree 里没有任务书 ${o.spec}(omd-lite clean ${o.name} 收尾)`);
+  const linked = (meta.node_modules_linked = linkNodeModules(repo, wt));
+  const allowed = allowedFromSpec(meta);
+  // 判据自证(借自 omd acceptance-gate):--red-check 的命令在 base 上必须失败。
+  // 在 base 上就绿 = 执行体什么都不做也能过,判据是虚的 → 不开跑。
+  for (const cmd of o.red_check ? [o.red_check] : []) {
+    console.error(`[omd-lite] 红闸预检(base 上应失败) $ ${cmd}`);
+    // 经 wrapper 时 sandbox-exec 要 PIW_MODEL / PIW_EXECUTOR 选臂;缺了它在 set -u 下直接退非 0,红闸预检就成了假红
+    const r = await runGate(cmd, wt, { ...process.env, PIW_EXECUTOR: o.executor || "pi", PIW_MODEL: o.model, PIW_OUT: out, OMD_LITE_OUT: out });
+    meta.red_check = { cmd, exit: r.code, timedOut: r.timedOut };
+    fs.writeFileSync(path.join(out, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+    if (r.code === 0) {
+      fs.writeFileSync(path.join(out, "result.json"), JSON.stringify({ gates: "not-run", error: "red-check-green-on-base", red_check: cmd }) + "\n");
+      die(`红闸预检没红:\`${cmd}\` 在 base 上已经通过,判据是虚的。改任务书(加一条实装前会失败的测试)再跑;收尾 piw clean ${o.name}`);
+    }
+  }
+  if (o.exec_wrapper) {
+    EXEC_WRAPPER = path.resolve(o.exec_wrapper);
+    if (!fs.existsSync(EXEC_WRAPPER)) die(`--exec-wrapper 不存在:${EXEC_WRAPPER}`);
+    meta.exec_wrapper = EXEC_WRAPPER;
+  }
+  const env = {
+    ...piw.workerEnv(process.env), // Q2:主机 shell 的密钥 / 指向生产的变量不进执行体(供应商 key 由 runPi 单独注入)
+    PIW_EXECUTOR: o.executor || "pi", PIW_MODEL: o.model,
+    PIW_GATES: JSON.stringify(o.gate), PIW_MAX_ROUNDS: String(meta.max_rounds), PIW_BASE: baseSha,
+    OMD_LITE_GATES: JSON.stringify(o.gate), OMD_LITE_MAX_ROUNDS: String(meta.max_rounds),
+    OMD_LITE_BASE: baseSha,
+    PIW_TOKEN_BUDGET: String(meta.token_budget),
+    PIW_IDLE: String(o.idle ?? process.env.PIW_IDLE ?? 1800), // 看门狗阈值:闸循环里分类期间的心跳按它定周期
+    ...(allowed ? { PIW_ALLOWED: JSON.stringify(allowed), OMD_LITE_ALLOWED: JSON.stringify(allowed) } : {}),
+  };
+  try { Object.assign(env, modelsJsonEnv({ o, env, meta, outDir: out })); } catch (err) { die(err.message); }
+  meta.start_epoch = Math.floor(Date.now() / 1000);
+  console.error(`[omd-lite] ${o.name}: worktree ${wt},输出 ${out}`);
+  const resultFile = path.join(out, "result.json");
+  meta.attempts = [];
+  if (["mcode", "claude", "agy", "codex"].includes(o.executor)) {
+    meta.executor = o.executor;
+    const exec = o.executor === "claude" ? claudeExecutor() : o.executor === "agy" ? agyExecutor() : o.executor === "codex" ? codexExecutor() : mcodeExec;
+    const code = await runMcode({ o, prompt, wt, env, dir: out, meta, baseSha, allowed, maxRounds: meta.max_rounds,
+      task: `按任务书 ${o.spec} 完成工作。先读任务书。`, exec });
+    let lastErr = null;
+    try { lastErr = JSON.parse(fs.readFileSync(resultFile, "utf8")).error || null; } catch {}
+    return finish({ o, meta, out, wt, baseSha, linked, resultFile, code, failedCoords: [], lastErr });
+  }
+  const sessionDir = path.join(out, "session");
+  let code = await runPi({ o, prompt, wt, env, dir: out, model: o.model, arm: "primary", sessionDir,
+    task: `按任务书 ${o.spec} 完成工作。先读任务书。${reuse ? RESUME_NOTE : ""}` });
+  meta.attempts.push({ model: o.model, pi_exit: code });
+  const fallback = o.fallback_model === "none" ? null : o.fallback_model || DEFAULT_FALLBACK;
+  let err = !fs.existsSync(resultFile) && providerError(path.join(out, "pi.jsonl"));
+  // 连接层断开 / 额度用完都不换坐标:按各自的等待表等,再在原会话、原坐标上 --continue(换 fallback = 新会话从头摸,已做的上下文全丢)。
+  // 额度表默认 33 × 600 s = 330 分钟,盖住 MiniMax 5 小时额度窗口;表用完仍报错才走下面的冷却 / fallback。等待在 runPi 外,不计执行体墙钟。
+  const table = (v) => String(v).split(",").filter((x) => x !== "").map(Number);
+  const backoff = table(env.PIW_NET_BACKOFF ?? "30,60,120,240,300,300");
+  const quotaBackoff = table(env.PIW_QUOTA_BACKOFF ?? Array(33).fill(600).join(","));
+  // 撞额度换同模型的兄弟坐标(D-8):默认关的开关。开着且角色表里有同模型的兄弟 → 立刻在原会话换兄弟续跑(不等额度表)。
+  // 关着 / 没有 --role / 没有兄弟 → 走原来的等待表(调用序列、目录名、冷却写入次数都不变)。
+  let siblingCfg = null;
+  try { siblingCfg = piw.loadConfig({ repo }); } catch {}
+  const siblingOn = !!o.role && !!siblingCfg && piw.siblingSwitchOn(siblingCfg, process.env);
+  let cur = o.model;   // 当前坐标(换过兄弟之后是兄弟)
+  const quotaHit = []; // 本次 run 里撞过额度的坐标(顺序,去重)
+  const findSibling = (coord) => {
+    if (!siblingOn) return null;
+    let x;
+    try { x = piw.expandChain(o.role, siblingCfg, { skip: o.skip_coord, env: process.env }); } catch { return null; }
+    // 本次 run 里已经撞过额度的坐标不再当兄弟:冷却写失败时也不会在两个坐标之间来回换(不会死循环)
+    return piw.siblingCoord(coord, x.chain.filter((c) => !quotaHit.includes(c)));
+  };
+  for (let ni = 0, qi = 0, qd = 0; ;) {
+    // 只等会自己恢复的额度(MiniMax 5 小时窗口:2056 / 429);余额不足 · 周限额等不回来,照旧走冷却 / fallback
+    const quotaErr = !!err && /\b(2056|429)\b/.test(err);
+    const quota = quotaErr && qi < quotaBackoff.length;
+    if (quotaErr && !quotaHit.includes(cur)) quotaHit.push(cur);
+    // 撞额度:先找同模型的兄弟坐标 —— 有就立刻换(不等额度表);没有才照旧写冷却、等等待表
+    const sib = quotaErr ? findSibling(cur) : null;
+    if (sib) {
+      // 写冷却:之后的候选里不再有它,新起的片也跳过它
+      try { piw.setCooldown(cur, err, siblingCfg, process.env); } catch {}
+      meta.sibling_switches = [...(meta.sibling_switches || []), { from: cur, to: sib }];
+      const dir = path.join(out, `quota-resume-${++qd}`); // qd = 已建的 quota-resume-* 目录数(换兄弟也占一个,不和等待表的序号重名)
+      fs.mkdirSync(dir);
+      console.error(`[omd-lite] ${o.name}: ${cur} 额度用完,换同模型的兄弟坐标 ${sib} 在原会话续跑(不等额度表)`);
+      code = await runPi({ o, prompt, wt, env, dir, outDir: out, model: sib, arm: "primary", sessionDir, cont: true,
+        task: "继续。上一轮因模型额度用完停下,已换到同模型的另一个套餐坐标,接着做完。" });
+      meta.attempts.push({ model: sib, pi_exit: code, resumed_after: err.slice(0, 300), switched_from: cur, waited_s: 0 });
+      cur = sib;
+      err = fs.existsSync(resultFile) ? null : providerError(path.join(dir, "pi.jsonl"));
+      continue;
+    }
+    // 第一次撞额度就写冷却:在跑的这片原会话等,新起的片看到冷却改走 mcode(executor-pick.mjs),不再一起撞上去一起等
+    if (quota && qi === 0) { try { piw.setCooldown(cur, err, piw.loadConfig({ repo }), process.env); } catch {} }
+    if (!quota && !(err && piw.isConnectionError(err) && ni < backoff.length)) break;
+    const wait = quota ? quotaBackoff[qi++] : backoff[ni++];
+    console.error(quota ? `[omd-lite] ${o.name}: 额度用完,${wait} s 后在原会话续跑(第 ${qi}/${quotaBackoff.length} 次)`
+      : `[omd-lite] ${o.name}: ${cur} 连接断开(${err.slice(0, 80)}),${wait} s 后在原会话续跑(第 ${ni}/${backoff.length} 次)`);
+    fs.writeFileSync(path.join(out, "meta.json"), JSON.stringify(meta, null, 2) + "\n"); // 等的时候 driver 被杀,attempts 也留在盘上
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    const dir = path.join(out, quota ? `quota-resume-${++qd}` : `resume-${ni}`);
+    fs.mkdirSync(dir);
+    code = await runPi({ o, prompt, wt, env, dir, outDir: out, model: cur, arm: "primary", sessionDir, cont: true,
+      task: quota ? "继续。上一轮因模型额度用完停下,现在额度已恢复,接着做完。" : "继续。上一轮因网络连接中断停下,接着做完。" });
+    meta.attempts.push({ model: cur, pi_exit: code, resumed_after: err.slice(0, 300), waited_s: wait });
+    err = fs.existsSync(resultFile) ? null : providerError(path.join(dir, "pi.jsonl"));
+  }
+  // 失败分类(与 ask 共用分类函数):供应商报错的坐标 + 末个报错的类别;额度类顺手写冷却
+  const failedCoords = [];
+  let lastErr = null;
+  const noteFail = (coord, text) => {
+    if (!failedCoords.includes(coord)) failedCoords.push(coord); // 同一坐标只记一次(换过兄弟时 fallback 可能就是刚失败的那个坐标)
+    lastErr = text;
+    if (piw.classifyError(text) === "quota") { try { piw.setCooldown(coord, text, piw.loadConfig({ repo }), process.env); } catch {} }
+  };
+  if (err) {
+    noteFail(o.model, err);
+    // 换过兄弟的 run:撞过额度的每个坐标都进 failedCoords(主坐标 + 每个撞额度的兄弟);末个报错的坐标也算
+    for (const c of [...quotaHit, cur]) if (c !== o.model && !failedCoords.includes(c)) failedCoords.push(c);
+  }
+  if (err && fallback && fallback !== o.model) {
+    // 备用模型按量计费:今天台账里 fallback 臂累计 ≥ 上限就不换,本片停下(主跑没报错时根本不看这里)
+    const cap = piw.fallbackCap(piw.loadConfig({ repo }), env);
+    const used = piw.usageToday(env).fallbackTotal;
+    if (used >= cap) {
+      meta.attempts.push({ model: fallback, skipped: "budget" });
+      console.error(`[piw] ${o.name}: 今日备用模型已用 ${used} token ≥ 上限 ${cap},不换 ${fallback},本片停下`);
+      return finish({ o, meta, out, wt, baseSha, linked, resultFile, code, failedCoords, lastErr, failureOverride: "budget" });
+    }
+    const dir = path.join(out, "fallback");
+    fs.mkdirSync(dir);
+    console.error(`[omd-lite] ${o.name}: ${o.model} 供应商报错(${err.slice(0, 120)}),换 ${fallback} 在同一 worktree 重跑`);
+    code = await runPi({ o, prompt, wt, env, dir, model: fallback, arm: "fallback", sessionDir: path.join(dir, "session"),
+      task: `按任务书 ${o.spec} 完成工作。先读任务书。上一个执行者因供应商报错中途停下，worktree 里可能已有它的部分改动：先 git status / git diff 看清，再接着做完。` });
+    meta.attempts.push({ model: fallback, pi_exit: code, after_error: err.slice(0, 300) });
+    if (fs.existsSync(path.join(dir, "result.json"))) fs.copyFileSync(path.join(dir, "result.json"), resultFile);
+    else { const err2 = providerError(path.join(dir, "pi.jsonl")); if (err2) noteFail(fallback, err2); else lastErr = null; }
+  }
+  return finish({ o, meta, out, wt, baseSha, linked, resultFile, code, failedCoords, lastErr });
+}
+
+// failureClass:quota|auth|stream|request|gate|base-red|brief-red|budget|hang|null(hang = 看门狗杀的,run 目录有 hang.json)。闸判过(result.json 有 pass/fail)以闸为准;没判过看末个供应商报错
+// (budget 不由这里算 —— 那是 fallback 超每日上限时驱动自己判的,经 finish 的 failureOverride 进来)
+// 只提交 changed-files.txt 列出的路径(linked 的依赖目录不进);不跑钩子:钩子是给人和执行体的闸,这里只是把已判过闸的产物存进分支。
+// 提交失败不让 finish 半途退出:记 meta.delivery_error,collect 照常收,只是分支上没有这次交付。
+function deliverCommit(wt, paths, meta) {
+  const g = (...a) => spawnSync("git", ["-C", wt, "-c", "core.hooksPath=/dev/null", ...a], { encoding: "utf8" });
+  const head = () => g("rev-parse", "HEAD").stdout.trim();
+  if (paths.length === 0) return head();
+  const add = g("add", "-A", "--sparse", "--", ...paths);
+  if (add.status !== 0) { meta.delivery_error = `git add:${add.stderr.trim().split("\n").pop()}`; return head(); }
+  if (g("diff", "--cached", "--quiet").status === 0) return head();
+  const c = g("-c", `user.name=${meta.executor || "pi"} (omd-lite)`, "-c", "user.email=omd-lite@localhost",
+    "commit", "-q", "--no-verify", "-m", `piw: ${meta.label} 交付(${meta.executor || "pi"} · ${meta.model ?? "-"})`);
+  if (c.status !== 0) meta.delivery_error = `git commit:${c.stderr.trim().split("\n").pop()}`;
+  return head();
+}
+
+function failureOf({ resultFile, lastErr }) {
+  if (fs.existsSync(path.join(path.dirname(resultFile), "hang.json"))) return "hang";
+  if (fs.existsSync(resultFile)) {
+    try { const c = classOfResult(JSON.parse(fs.readFileSync(resultFile, "utf8"))); if (c !== undefined) return c; } catch {}
+  }
+  return lastErr ? piw.classifyError(lastErr) : null;
+}
+
+function finish({ o, meta, out, wt, baseSha, linked, resultFile, code, failedCoords = [], lastErr = null, failureOverride = null }) {
+  if (!["mcode", "claude", "agy", "codex"].includes(meta.executor)) importGateEvents([out, path.join(out, "fallback")], { repo: meta.repo, run: meta.label, actor: meta.executor || "pi" }, appendEvent);
+  meta.end_epoch = Math.floor(Date.now() / 1000);
+  meta.wall_seconds = meta.end_epoch - meta.start_epoch;
+  meta.pi_exit = code;
+
+  // 只新增字段:meta.json 一定写;result.json 只在闸已经写过它时才补(没有时只写 meta.json,下面的 not-run 占位不带)
+  // failureOverride 是驱动自己判出来的停机原因(fallback 超每日上限 = "budget"),盖过按报错分类得出的值
+  meta.failureClass = failureOverride ?? failureOf({ resultFile, lastErr });
+  meta.failedCoords = failedCoords;
+  if (fs.existsSync(resultFile)) {
+    try {
+      const r = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+      fs.writeFileSync(resultFile, JSON.stringify({ ...r, failureClass: meta.failureClass, failedCoords }) + "\n");
+    } catch {}
+  }
+  if (!fs.existsSync(resultFile)) {
+    // 闸判过、红了,执行体修到一半被墙钟 / 看门狗 / 别的原因停下:闸结论是 fail,不是 not-run(26.10 C 类 12 片的闸结论被写丢)
+    const v = verdictFromGateLogs(out);
+    if (v) fs.writeFileSync(resultFile, JSON.stringify({ ...v, pi_exit: code, interrupted: code === 124 ? "wall" : `exit:${code}` }) + "\n");
+  }
+  if (!fs.existsSync(resultFile)) {
+    // 闸从没判过(供应商报错到底 / 超时 / pi 起不来)—— 不是 pass 也不是 fail
+    const hangFile = path.join(out, "hang.json");
+    const hang = fs.existsSync(hangFile) ? JSON.parse(fs.readFileSync(hangFile, "utf8")) : null;
+    // pi -p 在供应商报错到底时照样退 0:不把分类写进来,下游只读 result.json 的看到的就是「pi 正常结束、闸没跑」
+    const cls = failureOverride ?? (hang ? "hang" : meta.failureClass);
+    fs.writeFileSync(resultFile, JSON.stringify({ gates: "not-run", pi_exit: code, ...(cls ? { failureClass: cls, failedCoords } : {}), ...(hang ? { hang } : {}) }) + "\n");
+  }
+  if (meta.sparse) widenSparse(wt, meta.sparse, baseSha);
+  fs.writeFileSync(path.join(out, "diffstat.txt"), git(wt, "diff", "--stat", baseSha));
+  const changed = [
+    ...git(wt, "diff", "--name-only", baseSha).split("\n"),
+    ...git(wt, "ls-files", "--others", "--exclude-standard").split("\n").map((f) => f && `?? ${f}`),
+  ].filter((f) => f && !linked.includes(f.replace(/^\?\? /, "")));
+  fs.writeFileSync(path.join(out, "changed-files.txt"), changed.join("\n") + (changed.length ? "\n" : ""));
+  // 交付提交进 omdl/<run>:原先只有 collect 第 7 · 8 格才提交,停在前面格上的 run(claude 臂每次停第 2 格)worktree 被 wt-reap 归档删掉,
+  // 分支上什么都没有(24.10 mg2 · mg7 · mr1,claude-mods docs/investigations/2026-10-24-claude-executor-delivery-lost.md)
+  meta.delivered_sha = deliverCommit(wt, changed.map((f) => f.replace(/^\?\? /, "")), meta);
+  meta.tokens = meta.executor === "claude" ? usageFromClaudeRounds(out) : usageFromJsonl(path.join(out, "pi.jsonl"));
+  const fb = path.join(out, "fallback", "pi.jsonl");
+  if (fs.existsSync(fb)) { const t = usageFromJsonl(fb); for (const k of Object.keys(meta.tokens)) meta.tokens[k] += t[k]; }
+  meta.result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+  fs.writeFileSync(path.join(out, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+  console.error(`[omd-lite] ${o.name}: exit=${code} gates=${meta.result.gates} round=${meta.result.round ?? "-"} wall=${meta.wall_seconds}s`);
+}
+
+// ── ask:单轮、无工具、临时空 cwd ──────────────────────────────────────────────────
+function readStdin() { try { return fs.readFileSync(0, "utf8"); } catch { return ""; } }
+
+async function ask(o) {
+  if (!o.role) die(`缺 --role\n${USAGE}`);
+  const repo = path.resolve(o.repo || process.cwd());
+  const cfg = piw.loadConfig({ repo });
+  let x;
+  try { x = piw.expandChain(o.role, cfg, { skip: o.skip_coord }); } catch (e) { die(e.message); }
+  const pi = piw.resolvePi(cfg);
+  if (o.dry_run) {
+    const argv = x.chain.length ? piw.askArgv({ coord: x.chain[0], system: o.system ? `<${o.system} 的内容>` : null, user: "<user 文本>" }) : [];
+    console.log([
+      "[dry-run] omd-lite ask(不调模型)", `role: ${o.role}(配置: ${cfg.source})`,
+      `chain(展开后可用): ${x.chain.join("  →  ") || "(空:全部在冷却中)"}`, `chain(角色表原样): ${x.full.join("  →  ")}`,
+      `冷却中跳过: ${x.cooling.join(", ") || "无"}`, `冷却记录: ${piw.cooldownPath()}`,
+      `pi: ${pi.bin ?? "(未找到)"}(${pi.via})`,
+      `cwd: 每个坐标一个 mktemp -d 空目录,内含 .pi/settings.json = {"retry":{"enabled":false}}`,
+      `argv: ${argv.map((a) => JSON.stringify(a)).join(" ") || "(无)"}`,
+      "env 注入: 无(密钥由 pi 自己读 ~/.pi/agent/auth.json)",
+    ].join("\n"));
+    return;
+  }
+  const system = o.system ? fs.readFileSync(path.resolve(o.system), "utf8") : null;
+  const user = o.user ? fs.readFileSync(path.resolve(o.user), "utf8") : readStdin();
+  if (!user.trim()) die("user 文本为空(--user <文件> 或从 stdin 给)");
+  if (o.read_tools && !o.repo) die("--read-tools 要同时给 --repo(工具在那个仓里读)");
+  const r = await piw.ask({ role: o.role, system, user, cfg, repo, readTools: !!o.read_tools, log: (m) => console.error(m) });
+  if (r.exit === piw.EXIT.ok) { console.error(`PIW_OK ${r.coord}`); process.stdout.write(r.text.endsWith("\n") ? r.text : r.text + "\n"); process.exit(0); }
+  console.error(`PIW_FAIL ${r.failClass} ${r.failCoord}`);
+  process.exit(r.exit);
+}
+
+// ── mcode 执行器(owner 06.10):闸循环在本驱动里跑(pi 用的是 ext/gate-loop.ts,同一套判据)──────────
+const GATE_TIMEOUT_MS = 15 * 60 * 1000;
+const TAIL_LINES = 80;
+
+// 同一道闸连红这么多轮就提前停:回灌同一段失败输出不会让它好起来,只是烧轮数(conductor 复盘 §4.1)。
+const STUCK_ROUNDS = 3;
+const isStuck = (history) =>
+  history.length >= STUCK_ROUNDS && history.slice(-STUCK_ROUNDS).every((cmd) => cmd === history[history.length - 1]);
+
+// 闸也经 wrapper 起(F9:bwrap-audit —— 非 pi 臂的闸与执行体同在沙箱内;没给 --exec-wrapper 时 wrapped 原样返回,裸起不变)
+function runGate(cmd, cwd, env = process.env) {
+  return new Promise((resolve) => {
+    const child = spawn(...wrapped(cwd, "bash", ["-lc", cmd]), { cwd, env: { ...env, PIW_GATE: "1" }, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    child.stdout.on("data", (b) => chunks.push(b));
+    child.stderr.on("data", (b) => chunks.push(b));
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, "SIGKILL"); } catch {} }, GATE_TIMEOUT_MS);
+    const done = (code, extra = "") => { clearTimeout(timer); resolve({ cmd, code, timedOut, output: Buffer.concat(chunks).toString("utf8") + extra }); };
+    child.on("error", (e) => done(null, `\n[spawn error] ${e.message}`));
+    child.on("close", (code) => done(code));
+  });
+}
+
+// 越界判据与 ext/gate-loop.ts 的 outsideFiles 相同(测试文件新增 / 修改豁免;index 只加 export 豁免;删除不豁免)
+function outsideFilesJs(cwd, base, allowed) {
+  const out = (args) => { const r = spawnSync("git", args, { cwd, encoding: "utf8" }); return r.status === 0 ? r.stdout : ""; };
+  const changes = [];
+  for (const line of out(["diff", "--name-status", "--no-renames", base]).split("\n")) {
+    const m = line.match(/^([A-Z])\t(.+)$/); if (!m) continue;
+    const c = { status: m[1], path: m[2] };
+    if (c.status === "M" && /(^|\/)index\.[cm]?[jt]sx?$/.test(c.path)) c.diff = out(["diff", "-U0", base, "--", c.path]);
+    changes.push(c);
+  }
+  for (const f of out(["ls-files", "--others", "--exclude-standard"]).split("\n")) if (f) changes.push({ status: "A", path: f });
+  const inAllowed = (f) => allowed.some((a) => f === a || f.startsWith(a.endsWith("/") ? a : a + "/"));
+  const isTest = (f) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(f) || /(^|\/)test_[^/]*\.py$/.test(f);
+  const exportOnly = (c) => /(^|\/)index\.[cm]?[jt]sx?$/.test(c.path) && c.status === "M" && c.diff !== undefined &&
+    c.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l)).every((l) => /^\+\s*export\b/.test(l) || /^\+\s*$/.test(l));
+  return changes.filter((c) => !inAllowed(c.path)).filter((c) => !(c.status !== "D" && isTest(c.path))).filter((c) => !exportOnly(c))
+    .map((c) => (c.status === "D" ? `${c.path}(删除)` : c.path));
+}
+
+// MiniMax 一律跑 high(owner 09.10):mcode 走 --effort,pi 走 --thinking;模型串自带 :<thinking> 时以模型串为准
+const MINIMAX_EFFORT = "high";
+
+// --exec-wrapper(S1 沙箱,17.10):四条臂的 spawn 都经 `wrapped()` 加同一前缀,wrapper 自己决定怎么关执行体
+let EXEC_WRAPPER = null;
+const wrapped = (wt, cmd, args) => (EXEC_WRAPPER ? [EXEC_WRAPPER, [wt, "--", cmd, ...args]] : [cmd, args]);
+
+// 一轮 mcode exec:输出同时进终端(VibeTunnel 看得到)与 dir/mcode-round-<n>.log
+// 执行者须知:mcode 只自动注入工作区根的 CLAUDE.md,须知要经 --append-system-prompt-file 附进系统提示，否则它只是一句「先读」
+const BRIEF_PATH = "docs/process/executor-brief.md";
+function mcodeExec({ wt, env, dir, round, text, cont, wall, model }) {
+  // stream-json:默认 text 格式在非终端(管道)下只在结束时打印最后一条消息,VibeTunnel 里看不到过程(owner 08.10)。
+  // 原始事件进 .jsonl;人读的进度(工具调用一行 + 消息文字流)进 .log 与终端。
+  const args = ["exec", "--cwd", wt, ...(model ? ["--model", model] : []), "--effort", MINIMAX_EFFORT,
+    "--permission", "full", "--prompt-mode", "coding", "--timeout", `${wall}s`,
+    ...(fs.existsSync(path.join(wt, BRIEF_PATH)) ? ["--append-system-prompt-file", path.join(wt, BRIEF_PATH)] : []),
+    "--output-format", "stream-json",
+    "-o", path.join(dir, `mcode-round-${round}.last.md`), ...(cont ? ["--continue"] : []), text];
+  const log = fs.createWriteStream(path.join(dir, `mcode-round-${round}.log`));
+  const raw = fs.createWriteStream(path.join(dir, `mcode-round-${round}.jsonl`));
+  console.error(`\n[omd-lite] ── mcode 第 ${round} 轮${cont ? "(续)" : ""} ──`);
+  const out = (s) => { process.stderr.write(s); log.write(s); };
+  const brief = (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 160);
+  const render = (line) => {
+    let e; try { e = JSON.parse(line); } catch { out(line + "\n"); return; }
+    const it = e.item;
+    if (it?.type === "agent_message" && e.type !== "item.completed" && it.contentDelta) out(it.contentDelta);
+    else if (it?.type === "agent_message" && e.type === "item.completed") out("\n");
+    else if (it?.type === "tool_call" && e.type === "item.completed") {
+      const tc = it.toolCall ?? {}; const inp = tc.input ?? {};
+      const what = inp.command ?? inp.path ?? inp.file_path ?? inp.pattern ?? inp.description ?? "";
+      const st = tc.output?.details?.execution?.status;
+      out(`\n▸ ${tc.name ?? "tool"}${what ? `: ${brief(what)}` : ""}${st && st !== "succeeded" ? ` [${st}]` : ""}\n`);
+    } else if (e.type === "exec.completed") out(`\n[mcode] 完成${e.result?.status ? `(${e.result.status})` : ""}\n`);
+  };
+  return new Promise((resolve) => {
+    const child = spawn(...wrapped(wt, "mcode", args), { cwd: wt, env, stdio: ["ignore", "pipe", "pipe"] });
+    let buf = "", events = 0, errText = "";
+    child.stdout.on("data", (b) => {
+      raw.write(b); buf += b.toString(); events++;
+      let i; while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) render(l); }
+    });
+    child.stderr.on("data", (b) => { out(b.toString()); errText += b.toString(); });
+    child.on("close", () => { if (buf.trim()) render(buf); raw.end(); });
+    child.on("error", (e) => { log.end(); resolve({ code: null, err: e.message }); });
+    // 非 0 退出且一个事件都没吐 = 没起来(模型不在列表 · 会话不存在):当执行体错误,不拿空 diff 去跑闸记成 gate 红
+    child.on("close", (code) => { log.end(); resolve(code !== 0 && !events ? { code, err: errText.trim().slice(-300) || `mcode exit ${code},没有事件` } : { code }); });
+  });
+}
+
+// ── claude 执行器(2026-10-08 Haiku 对照实验):同一套闸循环,每轮一次 claude -p;续轮 --resume 同一会话 ──
+// 只加载仓库自己的设置(不带用户级 hooks / mods)、不带 MCP —— 与 mcode 一样只有仓库与工具。
+function claudeExecutor() {
+  let sessionId = null;
+  return ({ wt, env, dir, round, text, wall, model }) => {
+    const args = require("../lib/claude-args.js").claudeRunArgs({ model, sessionId, text });
+    const log = fs.createWriteStream(path.join(dir, `claude-round-${round}.log`));
+    const raw = fs.createWriteStream(path.join(dir, `claude-round-${round}.jsonl`));
+    console.error(`\n[omd-lite] ── claude 第 ${round} 轮${sessionId ? "(续)" : ""} ──`);
+    const out = (s) => { process.stderr.write(s); log.write(s); };
+    const render = (line) => {
+      let e; try { e = JSON.parse(line); } catch { out(line + "\n"); return; }
+      if (e.session_id) sessionId = e.session_id;
+      if (e.type === "assistant") for (const c of e.message?.content ?? []) {
+        if (c.type === "text") out(c.text + "\n");
+        else if (c.type === "tool_use") out(`▸ ${c.name}: ${String(c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? "").replace(/\s+/g, " ").slice(0, 160)}\n`);
+      } else if (e.type === "result") out(`\n[claude] 完成(${e.subtype})\n`);
+    };
+    return new Promise((resolve) => {
+      const child = spawn(...wrapped(wt, "claude", args), { cwd: wt, env, stdio: ["ignore", "pipe", "pipe"] });
+      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, wall * 1000);
+      let buf = "";
+      child.stdout.on("data", (b) => {
+        raw.write(b); buf += b.toString();
+        let i; while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) render(l); }
+      });
+      child.stderr.on("data", (b) => out(b.toString()));
+      child.on("error", (e) => { clearTimeout(timer); log.end(); resolve({ code: null, err: e.message }); });
+      child.on("close", (code) => { clearTimeout(timer); if (buf.trim()) render(buf); raw.end(); log.end(); resolve({ code }); });
+    });
+  };
+}
+
+// ── agy 执行器(17.10,三模审的 gemini 家族):同一套闸循环,每轮一次 agy -p。agy 的 -p 把紧跟的参数当提示词,
+// 其余 flag 全放前面;print 模式会在 cwd 写文件、跑命令(17.10 探针:建测试文件 + node --test,22 s)。不续会话:
+// agy 的 --continue 按「最近一次会话」找,多个 run 并行时会串,每轮把闸输出当新提示词给它。用量 agy 不报,记 0。
+function agyExecutor() {
+  return ({ wt, env, dir, round, text, wall, model }) => {
+    const args = [...(model ? ["--model", model] : []), "--dangerously-skip-permissions", "--output-format", "text", "-p", text];
+    const log = fs.createWriteStream(path.join(dir, `agy-round-${round}.log`));
+    console.error(`\n[omd-lite] ── agy 第 ${round} 轮 ──`);
+    const out = (s) => { process.stderr.write(s); log.write(s); };
+    return new Promise((resolve) => {
+      const child = spawn(...wrapped(wt, "agy", args), { cwd: wt, env, stdio: ["ignore", "pipe", "pipe"] });
+      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, wall * 1000);
+      child.stdout.on("data", (b) => out(b.toString()));
+      child.stderr.on("data", (b) => out(b.toString()));
+      child.on("error", (e) => { clearTimeout(timer); log.end(); resolve({ code: null, err: e.message }); });
+      child.on("close", (code) => { clearTimeout(timer); log.end(); resolve({ code }); });
+    });
+  };
+}
+
+// ── codex 执行器(S6a-1,沙箱臂):同一套闸循环,每轮一次 `codex exec`。沙箱 workspace-write 并开网络
+// (`-c sandbox_workspace_write.network_access=true`;唯一网络权威是 wrapper 的 bwrap + pasta,不是 flag)。
+// `-C` 落在 worktree;`--skip-git-repo-check`:worktree 不是独立仓库,不让它按仓库名校验。
+// 不续会话:每轮新起一次,把闸输出当新提示词给它(同 agy)。codex 不报用量,记 0(同 agy)。
+function codexArgs({ wt, dir, round, model, text }) {
+  return ["exec", "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "-C", wt,
+    "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-o", path.join(dir, `codex-round-${round}.last.md`), text];
+}
+
+function codexExecutor() {
+  return ({ wt, env, dir, round, text, wall, model }) => {
+    const args = codexArgs({ wt, dir, round, model, text });
+    const log = fs.createWriteStream(path.join(dir, `codex-round-${round}.log`));
+    console.error(`\n[omd-lite] ── codex 第 ${round} 轮 ──`);
+    const out = (s) => { process.stderr.write(s); log.write(s); };
+    return new Promise((resolve) => {
+      const child = spawn(...wrapped(wt, "codex", args), { cwd: wt, env, stdio: ["ignore", "pipe", "pipe"] });
+      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, wall * 1000);
+      child.stdout.on("data", (b) => out(b.toString()));
+      child.stderr.on("data", (b) => out(b.toString()));
+      child.on("error", (e) => { clearTimeout(timer); log.end(); resolve({ code: null, err: e.message }); });
+      child.on("close", (code) => { clearTimeout(timer); log.end(); resolve({ code }); });
+    });
+  };
+}
+
+// claude 各轮 result 事件里的用量合计(cost = claude 自报的 API 等价美元)
+function usageFromClaudeRounds(dir) {
+  const u = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, assistant_messages: 0 };
+  for (const f of fs.readdirSync(dir).filter((f) => /^claude-round-\d+\.jsonl$/.test(f))) {
+    for (const line of fs.readFileSync(path.join(dir, f), "utf8").split("\n")) {
+      if (!line.includes('"type":"result"')) continue;
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      const x = e.usage ?? {};
+      u.input += x.input_tokens || 0; u.output += x.output_tokens || 0;
+      u.cacheRead += x.cache_read_input_tokens || 0; u.cacheWrite += x.cache_creation_input_tokens || 0;
+      u.cost += e.total_cost_usd || 0; u.assistant_messages += e.num_turns || 0;
+    }
+  }
+  u.total = u.input + u.output + u.cacheRead + u.cacheWrite;
+  return u;
+}
+
+async function runMcode({ o, prompt, wt, env, dir, meta, baseSha, allowed, maxRounds, task, exec = mcodeExec }) {
+  // 事件流(F2):一轮执行体一行、一轮闸一行;repo / run / actor 三处相同,收在这里
+  const ev = (e) => appendEvent({ repo: meta.repo, run: meta.label, actor: meta.executor, ...e });
+  const e = { ...env, PIW_OUT: dir, OMD_LITE_OUT: dir, MYAPP_UNTRUSTED_AGENT: "1" };
+  const guardBin = path.join(wt, "scripts", "dev", "agent-guard", "bin");
+  if (fs.existsSync(guardBin)) e.PATH = `${guardBin}:${e.PATH ?? ""}`;
+  const wall = Number(o.wall || 3600);
+  const brief = fs.existsSync(path.join(wt, BRIEF_PATH)) ? `执行者须知 ${BRIEF_PATH} 已附在系统提示里;` : "";
+  let text = `${prompt.text}\n\nWORKTREE: ${wt}\n你是执行者。${brief}${task}完成后按须知的收尾报告格式回报,然后停下。`;
+  let lastExit = null;
+  const failedHistory = []; // 每轮首个失败的闸命令,判「同一道闸连红」
+  for (let round = 1; round <= maxRounds; round++) {
+    const r = await exec({ wt, env: e, dir, round, text, cont: round > 1, wall, model: o.model === "default" ? null : o.model });
+    lastExit = r.code;
+    ev({ phase: "round", status: r.err ? "err" : `exit:${r.code}`, round });
+    if (r.err) { fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify({ gates: "not-run", error: r.err }) + "\n"); return null; }
+    const runs = [];
+    for (const g of o.gate) { console.error(`[omd-lite] 闸 $ ${g}`); const gr = await runGate(g, wt, e); runs.push(gr); console.error(`[omd-lite]   exit=${gr.code}${gr.timedOut ? " (超时)" : ""}`); if (gr.code !== 0) break; }
+    let failed = runs.find((x) => x.code !== 0);
+    let outside;
+    if (!failed && allowed) {
+      outside = outsideFilesJs(wt, baseSha, allowed);
+      if (outside.length) {
+        failed = { cmd: "越界改动检查(任务书「允许改动:」)", code: 1, timedOut: false,
+          output: ["下列改动不在任务书「允许改动」里:", ...outside.map((f) => `  ${f}`),
+            `还原它们(已跟踪的用 \`git checkout ${baseSha.slice(0, 12)} -- <文件>\`,新建的删掉);如果确实非改不可,停下并说明理由。`].join("\n") };
+        runs.push(failed);
+      }
+    }
+    const gateLog = path.join(dir, `gate-round-${round}.log`);
+    fs.writeFileSync(gateLog,
+      runs.map((x) => `### $ ${x.cmd}\n### exit=${x.code}${x.timedOut ? " (timeout)" : ""}\n${x.output}\n`).join("\n"));
+    if (failed) failedHistory.push(failed.cmd);
+    const stuck = !!failed && isStuck(failedHistory);
+    ev({ phase: "gate", status: failed ? "fail" : "pass", round, evidence: gateLog, ...(failed ? { failed_gate: failed.cmd, ...(stuck ? { stuck: "stuck-gate" } : {}) } : {}) });
+    if (!failed) {
+      fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify({ gates: "pass", round, ...(outside ? { outside } : {}) }) + "\n");
+      console.error(`[omd-lite] 闸全过(第 ${round} 轮)`);
+      return lastExit;
+    }
+    if (round >= maxRounds || stuck) {
+      fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify({ gates: "fail", round, failed_gate: failed.cmd, exit: failed.code,
+        timed_out: failed.timedOut, ...(stuck ? { stuck: "stuck-gate" } : {}), ...(outside ? { outside } : {}) }) + "\n");
+      console.error(stuck ? `[omd-lite] 同一道闸连红 ${STUCK_ROUNDS} 轮,提前停(stuck-gate)` : `[omd-lite] 闸未过,轮数用完(${round})`);
+      return lastExit;
+    }
+    text = [`闸未通过(第 ${round}/${maxRounds} 轮)。失败的命令:`, "```", failed.cmd, "```",
+      `退出码 ${failed.code}${failed.timedOut ? "(超时被杀)" : ""}。输出最后 ${TAIL_LINES} 行:`, "```",
+      failed.output.split("\n").slice(-TAIL_LINES).join("\n"), "```",
+      "修好它,修完就停。不许削弱、跳过或删除测试,不许改闸命令本身;如果你认为判据本身错了,停下并说明理由。"].join("\n");
+  }
+  return lastExit;
+}
+
+// 跑一次 pi:jsonl / stderr / 闸日志 / result.json 都写进 dir(主跑 = out,换模型重跑 = out/fallback)
+// run 的 pi 参数(runPi 与 --dry-run 共用)
+// pi 臂用自己的提示词臂当系统提示，仓里的执行者须知到不了它(24.10 OtherApp st-j-ctx 0 次提到须知)。
+// 只附这一份短文件：上下文纪律(样式片按节点取原型等),不把整份须知换进来。
+const CONTEXT_RULES = "docs/process/executor-context.md";
+function piRunArgs({ o, model, systemPrompt, task, sessionDir, cont, contextRules = null }) {
+  return [
+    "--no-extensions", "-e", path.join(ROOT, "ext", "gate-loop.ts"),
+    "--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", sessionDir, ...(cont ? ["--continue"] : []),
+    ...(o.noContext ? ["--no-context-files"] : []),
+    "--mode", "json", "-p", "--model", model,
+    ...(/minimax/i.test(model) && !/:[a-z]+$/.test(model) ? ["--thinking", MINIMAX_EFFORT] : []),
+    "--system-prompt", systemPrompt,
+    ...(contextRules ? ["--append-system-prompt", contextRules] : []),
+    task,
+  ];
+}
+
+// outDir:沙箱里唯一可写的 run 目录(OMD_LITE_OUT,result.json 与会话都在里面);dir:本次尝试的日志目录(宿主侧写)。
+async function runPi({ o, prompt, wt, env, dir, model, arm, task, sessionDir, cont = false, outDir = dir }) {
+  const rules = path.join(wt, CONTEXT_RULES);
+  const piArgs = piRunArgs({ o, model, systemPrompt: prompt.text, task, sessionDir, cont, contextRules: fs.existsSync(rules) ? rules : null });
+  const pi = piw.resolvePi(piw.loadConfig({ repo: path.resolve(o.repo) }), env);
+  if (!pi.bin) die("找不到 pi(PIW_PI_BIN / fnm default alias / PATH 都没有)");
+  // 只把本次模型供应商那一个 key 交给 pi:执行端的 bash 会继承环境,.env 整包导入 = 模型能 `env` 看到全部密钥。
+  const e = { ...env, PIW_OUT: outDir, OMD_LITE_OUT: outDir };
+  // 目标仓若带执行体闸(myapp:scripts/dev/agent-guard/bin 里的 pkill / killall),放到 PATH 最前(owner 06.10)。
+  const guardBin = path.join(wt, "scripts", "dev", "agent-guard", "bin");
+  if (fs.existsSync(guardBin)) e.PATH = `${guardBin}:${e.PATH ?? ""}`;
+  const keyVar = providerKeyVar(model);
+  const keyVal = keyVar ? readEnvVar(ENV_FILE, keyVar) : undefined;
+  if (keyVar && !keyVal) die(`${ENV_FILE} 里没有 ${keyVar}`);
+  if (keyVar) e[keyVar] = keyVal;
+  // 原始事件进 pi.jsonl;人读的进度(文字流 + 工具调用一行)进 pi.log 与终端 —— 与 mcode 一样,`vt omd-lite run …` 可在 VibeTunnel 里看
+  const raw = fs.createWriteStream(path.join(dir, "pi.jsonl"));
+  const errLog = fs.createWriteStream(path.join(dir, "pi.stderr.log"));
+  const log = fs.createWriteStream(path.join(dir, "pi.log"));
+  console.error(`\n[omd-lite] ── pi · ${model} ──`);
+  const out = (s) => { process.stderr.write(s); log.write(s); };
+  const brief = (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 160);
+  const render = (line) => {
+    let x; try { x = JSON.parse(line); } catch { return; }
+    const ev = x.assistantMessageEvent;
+    if (x.type === "message_update" && ev?.type === "text_delta") out(ev.delta ?? "");
+    else if (x.type === "message_update" && ev?.type === "text_end") out("\n");
+    else if (x.type === "message_update" && ev?.type === "thinking_start") out("· 思考…\n");
+    else if (x.type === "tool_execution_start") {
+      const a = x.args ?? {};
+      const what = a.command ?? a.path ?? a.file_path ?? a.pattern ?? "";
+      out(`▸ ${x.toolName ?? "tool"}${what ? `: ${brief(what)}` : ""}\n`);
+    } else if (x.type === "tool_execution_end" && x.isError) out(`  [${x.toolName ?? "tool"} 出错]\n`);
+    else if (x.type === "agent_end") out(`\n[pi] 结束\n`);
+  };
+  // stdin 必须关掉,否则 pi -p 会等 stdin EOF
+  const pass = piw.mergeEnvPass(e.SANDBOX_ENV_PASS, keyVar);
+  if (pass) e.SANDBOX_ENV_PASS = pass;
+  e.PIW_MODEL = model;
+  // 沙箱只读绑了 settings.json(列着扩展包)却看不到 ~/.pi/agent/npm,pi 会当扩展缺失、每次起片经沙箱网络重装;
+  // 执行体本来就 --no-extensions。19.10 并发一多就 ETIMEDOUT,03:46 起 pi 臂全部 not-run。
+  e.PI_OFFLINE = "1";
+  // detached:pi 与它起的工具进程同在一个进程组,看门狗按组杀(只杀 timeout 的话,孤儿 pi 攥着 stdout,close 永远不来)
+  // 墙钟只计执行体的时间:闸在跑(run 目录有 gate-running)时暂停(26.10 page-settings 收尾报告写完、闸跑到一半被 timeout 杀,整片作废)。
+  // coreutils timeout 只留作兜底(墙钟 3 倍),到点照旧退 124。
+  const wall = Number(o.wall || 3600);
+  const child = spawn(...wrapped(wt, "timeout", [String(wall * 3), pi.bin, ...piArgs]), {
+    cwd: wt, env: e, stdio: ["ignore", "pipe", "pipe"], detached: true,
+  });
+  const clock = wallClock(wall, () => fs.existsSync(path.join(outDir, GATE_RUNNING)));
+  let wallKilled = false;
+  const wallTimer = setInterval(() => {
+    if (!clock.tick(Date.now())) return;
+    clearInterval(wallTimer);
+    wallKilled = true;
+    fs.writeFileSync(path.join(dir, "wall.json"), JSON.stringify({ wall, active_s: Math.round(clock.active()) }) + "\n");
+    out(`\n[piw] 执行体用满墙钟 ${wall} s(闸的时间不算),停下\n`);
+    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+    setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 10e3).unref();
+  }, 5000);
+  let buf = "";
+  // 看门狗(18.10):pi 的 stdout / stderr 超过 idle 秒没有一个字节就杀,不等墙钟。阈值见 docs/idle-watchdog.md。
+  // 还没返回的工具调用记在 open 里,杀时把最后那条命令写进 hang.json,finish 据它判 failureClass。
+  const idle = Number(o.idle ?? process.env.PIW_IDLE ?? 1800);
+  const open = new Map();
+  let lastAt = Date.now();
+  const track = (l) => {
+    if (!l.startsWith('{"type":"tool_execution_')) return;
+    let x; try { x = JSON.parse(l); } catch { return; }
+    if (x.type === "tool_execution_start") open.set(x.toolCallId, x.args?.command ?? x.args?.path ?? x.toolName ?? "");
+    else if (x.type === "tool_execution_end") open.delete(x.toolCallId);
+  };
+  const dog = setInterval(() => {
+    const s = (Date.now() - lastActivity(lastAt, outDir)) / 1000;
+    if (s < idle) return;
+    clearInterval(dog);
+    const command = [...open.values()].at(-1) ?? null;
+    fs.writeFileSync(path.join(dir, "hang.json"), JSON.stringify({ idle_s: Math.round(s), command }) + "\n");
+    out(`\n[omd-lite] ${Math.round(s)} s 没有输出,看门狗杀掉执行体${command ? `(卡在:${brief(command)})` : ""}\n`);
+    try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+  }, Math.min(30, Math.max(1, idle / 4)) * 1000);
+  child.stdout.on("data", (b) => {
+    lastAt = Date.now();
+    raw.write(b); buf += b.toString();
+    let i; while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) { track(l); render(l); } }
+  });
+  child.stderr.on("data", (b) => { lastAt = Date.now(); errLog.write(b); out(b.toString()); });
+  const closed = (s) => new Promise((r) => s.end(r));
+  // 文件写完再返回:providerError / usageFromJsonl 紧接着要读 pi.jsonl
+  return new Promise((r) => child.on("close", async (c) => {
+    clearInterval(dog);
+    clearInterval(wallTimer);
+    if (buf.trim()) render(buf);
+    await Promise.all([closed(raw), closed(errLog), closed(log)]);
+    recordUsage(env, o, { model, arm, dir }); // 文件写完才记账:providerError / usageFromJsonl 紧接着要读 pi.jsonl
+    r(wallKilled ? 124 : c);
+  }));
+}
+
+// 最后一个 agent_end 以供应商报错收尾(pi 自己的重试已用完)→ 返回错误文本;否则 null
+function providerError(jsonl) {
+  if (!fs.existsSync(jsonl)) return null;
+  let last = null;
+  for (const line of fs.readFileSync(jsonl, "utf8").split("\n")) {
+    if (!line.startsWith('{"type":"agent_end"')) continue;
+    try { last = JSON.parse(line); } catch {}
+  }
+  const m = last?.messages?.at(-1);
+  return m?.role === "assistant" && m.stopReason === "error" ? m.errorMessage || "error" : null;
+}
+
+// ── 稀疏检出 ─────────────────────────────────────────────────────────────────────
+// 默认不检出的存档目录(base 里没有的自动跳过)。被以下三处点名的子目录加回来:
+// 任务书「允许改动」· 任务书正文里写到的路径 · base 上 scripts / docs/design/tests / apps / packages 里写死的路径(截图脚本读已批的参考图、写自己的输出目录)。
+const SPARSE_DEFAULT = "docs/design/reviews,docs/design/_shots-web,docs/design/_shots-mobile,docs/reviews,docs/research";
+
+function sparsePlan(repo, baseSha, spec, excludeCsv) {
+  const exists = (p) => spawnSync("git", ["-C", repo, "cat-file", "-e", `${baseSha}:${p}`]).status === 0;
+  const exclude = String(excludeCsv).split(",").map((s) => s.trim().replace(/\/+$/, "")).filter((d) => d && exists(d));
+  if (!exclude.length) return null;
+  const keep = new Set();
+  // 加回到「被排除目录的下一级」,让同目录的兄弟文件(对照图)也在
+  const add = (raw) => {
+    const p = raw.replace(/^\.\//, "").replace(/[`'"),.;:：，。]+$/, "");
+    for (const d of exclude) {
+      if (p === d) return keep.add(d);
+      if (p.startsWith(d + "/")) return keep.add(d + "/" + p.slice(d.length + 1).split("/")[0]);
+    }
+  };
+  const specText = spawnSync("git", ["-C", repo, "show", `${baseSha}:${spec}`], { encoding: "utf8" }).stdout || "";
+  const allowed = allowedFromSpec({ repo, base_sha: baseSha, spec }) || [];
+  for (const a of allowed) add(a);
+  for (const m of specText.matchAll(/[\w.-]+(?:\/[\w.@-]+)+/g)) add(m[0]);
+  const pattern = exclude.map((d) => d.replace(/[.]/g, "\\.") + "/[A-Za-z0-9._@-]+").join("|");
+  const g = spawnSync("git", ["-C", repo, "grep", "-ohE", pattern, baseSha, "--", "scripts", "docs/design/tests", "apps", "packages"], { encoding: "utf8" });
+  for (const l of (g.stdout || "").split("\n")) if (l) add(l);
+  return { exclude, keep: [...keep].sort() };
+}
+
+const sparsePatterns = ({ exclude, keep }) => ["/*", ...exclude.map((d) => `!/${d}/`), ...keep.map((k) => `/${k}`), ...keep.map((k) => `/${k}/`)];
+
+// 执行手往没加回的被排除目录里写了文件:把那一级加回 sparse 定义,否则合并时 git add 会拒收这些路径
+function widenSparse(wt, sparse, baseSha) {
+  const files = [
+    ...git(wt, "diff", "--name-only", baseSha).split("\n"),
+    ...git(wt, "ls-files", "--others", "--exclude-standard").split("\n"),
+  ].filter(Boolean);
+  const more = new Set();
+  for (const f of files) for (const d of sparse.exclude) {
+    if (!f.startsWith(d + "/")) continue;
+    const k = d + "/" + f.slice(d.length + 1).split("/")[0];
+    if (!sparse.keep.includes(k)) more.add(k);
+  }
+  if (!more.size) return;
+  sparse.keep = [...new Set([...sparse.keep, ...more])].sort();
+  sparse.widened = [...more].sort();
+  git(wt, "sparse-checkout", "set", "--no-cone", ...sparsePatterns(sparse));
+}
+
+// 任务书(base 上的那一份)→ 允许路径表(逗号 / 顿号 / 空白分隔,目录以 / 结尾或按前缀);任务书没点名 → null。
+// 「文本 → 路径」由 lib/brief.mjs 说了算(F1):它认 frontmatter(块内拥有 允许改动,正文同名行不读),
+// 也剥紧贴路径的「(新建)」——本文件那份旧正则两件都不做,任务书写 `x.ts(新建)` 时会把整串当路径(TODO 18.10)。
+function allowedFromSpec(meta) {
+  const r = spawnSync("git", ["-C", meta.repo, "show", `${meta.base_sha}:${meta.spec}`], { encoding: "utf8" });
+  return allowedList(r.stdout || "");
+}
+
+function readMeta(l) {
+  const f = path.join(RUNS, l, "meta.json");
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
+}
+
+function report(labels) {
+  if (!labels.length) die(USAGE);
+  const rows = [["label", "arm", "ctx", "model", "wall_s", "gates", "rounds", "pi_exit", "files", "outside", "tok_in", "tok_out", "cache_r", "cost"]];
+  const notes = [];
+  for (const l of labels) {
+    const m = readMeta(l);
+    if (!m) { notes.push(`${l}: 没有 meta.json`); continue; }
+    const cf = path.join(RUNS, l, "changed-files.txt");
+    const files = (fs.existsSync(cf) ? fs.readFileSync(cf, "utf8") : "").split("\n").filter(Boolean).map((s) => s.replace(/^\?\? /, ""));
+    const allowed = allowedFromSpec(m);
+    let outside = "-";
+    if (Array.isArray(m.result?.outside)) {
+      // 闸判过(已扣豁免:测试文件 / index 只加 export)
+      outside = String(m.result.outside.length);
+      if (m.result.outside.length) notes.push(`${l} 越界: ${m.result.outside.join(" ")}`);
+    } else if (allowed) {
+      const bad = files.filter((f) => !allowed.some((a) => f === a || f.startsWith(a.endsWith("/") ? a : a + "/")));
+      outside = String(bad.length);
+      if (bad.length) notes.push(`${l} 越界: ${bad.join(" ")}`);
+    }
+    const t = m.tokens || {};
+    const model = m.attempts?.length > 1 ? `${m.model}→${m.attempts.at(-1).model}` : m.model;
+    rows.push([l, m.prompt_arm, m.context ? "on" : "off", model, m.wall_seconds, m.result?.gates, m.result?.round ?? "-", m.pi_exit,
+      files.length, outside, t.input, t.output, t.cacheRead, (t.cost || 0).toFixed(4)].map(String));
+  }
+  const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+  for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join("  "));
+  if (notes.length) console.log("\n" + notes.join("\n"));
+  if (rows.length > 1) console.log("\noutside = 改动落在任务书「允许改动:」之外的文件数;'-' = 任务书没有该行");
+}
+
+function clean(labels) {
+  for (const l of labels) {
+    const f = path.join(RUNS, l, "meta.json");
+    if (!fs.existsSync(f)) { console.error(`${l}: 没有 meta.json,跳过`); continue; }
+    const m = JSON.parse(fs.readFileSync(f, "utf8"));
+    spawnSync("git", ["-C", m.repo, "worktree", "remove", "--force", m.worktree], { stdio: "inherit" });
+    spawnSync("git", ["-C", m.repo, "branch", "-D", m.branch], { stdio: "inherit" });
+  }
+}
+
+// ── retro(批后复盘的确定性汇总,纯读 runs 目录,不调模型)──────────────────────────────
+function runLabels() {
+  if (!fs.existsSync(RUNS)) return [];
+  return fs.readdirSync(RUNS).filter((l) => fs.existsSync(path.join(RUNS, l, "meta.json")));
+}
+function readText(f) { return fs.existsSync(f) ? fs.readFileSync(f, "utf8") : ""; }
+// 大 jsonl 只读头尾各 64 KB:开局错误(锁)在头,exec.completed 在尾
+function readHeadTail(f, n = 65536) {
+  if (!fs.existsSync(f)) return null;
+  const size = fs.statSync(f).size;
+  if (size <= 2 * n) return fs.readFileSync(f, "utf8");
+  const fd = fs.openSync(f, "r"); const a = Buffer.alloc(n), b = Buffer.alloc(n);
+  fs.readSync(fd, a, 0, n, 0); fs.readSync(fd, b, 0, n, size - n); fs.closeSync(fd);
+  return a.toString("utf8") + "\n" + b.toString("utf8");
+}
+// run 开始时刻:meta.start_epoch;run 中途(meta 只写过第一份)= meta.json 的 mtime
+function startEpoch(l, m) { return m.start_epoch ?? Math.floor(fs.statSync(path.join(RUNS, l, "meta.json")).mtimeMs / 1000); }
+
+/** 墙钟:只累计 paused() 为假时流过的时间;tick(now) 返回是否已用满。 */
+function wallClock(wallSeconds, paused, start = Date.now()) {
+  let active = 0, last = start;
+  return {
+    tick(now) { const dt = (now - last) / 1000; last = now; if (!paused()) active += dt; return active >= wallSeconds; },
+    active: () => active,
+  };
+}
+
+/** run 目录里最后一轮闸的结论(gate-round-<n>.log)→ { gates: "fail", round, failed_gate, exit } · 全过 → { gates: "pass", round } · 没有日志 → null */
+function verdictFromGateLogs(dir) {
+  const rounds = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).map((f) => f.match(/^gate-round-(\d+)\.log$/)?.[1]).filter(Boolean).map(Number);
+  if (!rounds.length) return null;
+  const round = Math.max(...rounds);
+  const gates = parseGateLog(readText(path.join(dir, `gate-round-${round}.log`)));
+  const f = gates.find((g) => g.exit !== "0");
+  return f ? { gates: "fail", round, failed_gate: f.cmd, exit: f.exit } : { gates: "pass", round };
+}
+
+// gate-round-<n>.log → [{ cmd, exit, timedOut, stage, noChange, outside[] }]
+function parseGateLog(text) {
+  return text.split(/^### \$ /m).slice(1).map((chunk) => {
+    const [cmd, exitLine = "", ...rest] = chunk.split("\n");
+    const out = rest.join("\n");
+    const em = exitLine.match(/^### exit=(\S+)( \(timeout\))?/);
+    const stages = [...out.matchAll(/^== (.+)$/gm)];
+    const stage = stages.length ? stages.at(-1)[1].replace(/[((].*$/, "").trim() : null;
+    const outside = /^越界改动检查/.test(cmd) ? [...out.matchAll(/^  (\S.*)$/gm)].map((x) => x[1].trim()) : [];
+    return { cmd: cmd.trim(), exit: em ? em[1] : "?", timedOut: !!em?.[2], stage, noChange: /FAIL 没有改动/.test(out), outside };
+  });
+}
+
+// mcode 执行器本身这一轮挂了没有(区分「执行器挂了」与「执行体真没交付」)→ 错误码 / null
+function executorFail(dir, round) {
+  const log = readText(path.join(dir, `mcode-round-${round}.log`));
+  const jsonl = readHeadTail(path.join(dir, `mcode-round-${round}.jsonl`));
+  if (jsonl === null && !log) return null; // 不是 mcode 轮
+  const lock = (log + "\n" + (jsonl ?? "")).match(/agent_name_conflict[\w:]*|\b[a-z_]+_migration_failed:\w+/);
+  if (lock) return lock[0];
+  let done = null;
+  for (const line of (jsonl ?? "").split("\n")) {
+    if (!line.includes('"exec.completed"')) continue;
+    try { done = JSON.parse(line); } catch {}
+  }
+  if (done?.result?.status === "failed") {
+    const err = done.result.error ?? {};
+    return err.code || String(err.message ?? "failed").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+  }
+  const fm = log.match(/mcode exec failed: (.{0,60})/);
+  if (fm) return fm[1].trim();
+  if (!done && !(jsonl ?? "").trim() && !log.trim()) return "无输出";
+  return null;
+}
+
+const shortCmd = (c) => (c.length > 60 ? c.slice(0, 57) + "…" : c);
+function firstFailKey(round) {
+  if (round.exec) return `执行器挂了(${round.exec})`;
+  const f = round.gates.find((g) => g.exit !== "0");
+  if (!f) return null;
+  if (f.noChange) return "执行体没交付(没有改动)";
+  return `${shortCmd(f.cmd)}${f.stage ? ` › ${f.stage}` : ""}${f.timedOut ? "(超时)" : ""}`;
+}
+
+function runInfo(l, m, procs) {
+  const dir = path.join(RUNS, l);
+  const res = m.result ?? (fs.existsSync(path.join(dir, "result.json")) ? JSON.parse(readText(path.join(dir, "result.json"))) : null);
+  const rounds = [];
+  for (const [sub, tag] of [["", ""], ["fallback", "fb"]]) {
+    const d = path.join(dir, sub);
+    if (!fs.existsSync(d)) continue;
+    const ns = new Set();
+    for (const f of fs.readdirSync(d)) { const x = f.match(/^(?:gate|mcode)-round-(\d+)\./); if (x) ns.add(Number(x[1])); }
+    for (const n of [...ns].sort((a, b) => a - b)) {
+      const gates = parseGateLog(readText(path.join(d, `gate-round-${n}.log`)));
+      const exec = executorFail(d, n);
+      rounds.push({ n: `${tag}${n}`, gates, exec });
+    }
+  }
+  // spawn 失败之类:执行器一个字没写,错误只在 result.json
+  if (res?.error && rounds.at(-1)?.exec === "无输出") rounds.at(-1).exec = String(res.error).slice(0, 40);
+  const status = res?.gates ?? (isRunning(l, m, procs) ? "running" : "中断");
+  // meta.executor 只在 run 结束时写;中途的按产物判
+  const executor = m.executor ?? (fs.readdirSync(dir).some((f) => f.startsWith("mcode-round-")) ? "mcode"
+    : fs.existsSync(path.join(dir, "pi.jsonl")) ? "pi" : "?");
+  const outsideAll = new Set(rounds.flatMap((r) => r.gates.flatMap((g) => g.outside)));
+  for (const f of res?.outside ?? []) outsideAll.add(f);
+  let notRun = null;
+  if (status === "not-run") {
+    notRun = res.error ?? (m.pi_exit === 124 ? "墙钟超时" : m.attempts?.at(-1)?.after_error ? "供应商报错" : `退出码 ${m.pi_exit ?? res.pi_exit ?? "?"}`);
+    notRun = String(notRun).slice(0, 60);
+  }
+  return { l, m, executor, status, rounds, roundsN: res?.round ?? rounds.filter((r) => r.gates.length).length,
+    finalOutside: Array.isArray(res?.outside) ? res.outside.length : null, outsideAll: [...outsideAll],
+    fallback: (m.attempts?.length ?? 0) > 1, notRun };
+}
+
+function retro(argv) {
+  let since = null; const labels = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--since") { since = argv[++i]; if (!/^\d{4}-\d{2}-\d{2}$/.test(since ?? "")) die("--since 要 YYYY-MM-DD"); }
+    else if (argv[i].startsWith("--")) die(`未知参数 ${argv[i]}\n${USAGE}`);
+    else labels.push(argv[i]);
+  }
+  const sinceEpoch = since ? new Date(`${since}T00:00:00`).getTime() / 1000 : null;
+  const procs = processArgs();
+  const infos = [];
+  for (const l of labels.length ? labels : runLabels()) {
+    const m = readMeta(l);
+    if (!m) { console.error(`${l}: 没有 meta.json,跳过`); continue; }
+    if (sinceEpoch !== null && startEpoch(l, m) < sinceEpoch) continue;
+    infos.push(runInfo(l, m, procs));
+  }
+  infos.sort((a, b) => startEpoch(a.l, a.m) - startEpoch(b.l, b.m));
+
+  console.log(`## 逐 run(${infos.length} 个${since ? `,自 ${since}` : ""})\n`);
+  const rows = [["label", "exec", "result", "rounds", "outside", "fallback", "wall_min", "首败(每轮)"]];
+  for (const x of infos) {
+    const fails = x.rounds.map((r) => { const k = firstFailKey(r); return k ? `r${r.n} ${k}` : null; }).filter(Boolean);
+    rows.push([x.l, x.executor, x.status + (x.notRun ? `(${x.notRun})` : ""), String(x.roundsN),
+      x.finalOutside === null ? "-" : String(x.finalOutside), x.fallback ? "是" : "-",
+      x.m.wall_seconds == null ? "-" : (x.m.wall_seconds / 60).toFixed(0), fails.join(" · ") || "-"]);
+  }
+  printTable(rows);
+
+  // 聚合(D6:同一模式 ≥ 2 个 run 才列;单次的只在上表)
+  const tally = (pick) => {
+    const t = new Map();
+    for (const x of infos) for (const k of new Set(pick(x))) { if (!t.has(k)) t.set(k, []); t.get(k).push(x.l); }
+    return [...t].filter(([, ls]) => ls.length >= 2).sort((a, b) => b[1].length - a[1].length);
+  };
+  const section = (title, entries, note) => {
+    console.log(`\n### ${title}${note ? `(${note})` : ""}\n`);
+    if (!entries.length) { console.log("(无 ≥ 2 次的)"); return; }
+    printTable([["模式", "runs", "例"], ...entries.map(([k, ls]) => [k, String(ls.length), ls.slice(0, 4).join(" ") + (ls.length > 4 ? " …" : "")])]);
+  };
+  console.log("\n## 聚合(只列 ≥ 2 个 run 出现的)");
+  section("首败闸 / 执行器失败", tally((x) => x.rounds.map(firstFailKey).filter(Boolean)), "任一轮出现即计 1 个 run");
+  section("越界文件", tally((x) => x.outsideAll), "同一文件被越界改 ≥ 2 次 = 「允许改动」漏列候选");
+  section("执行器失败", tally((x) => x.rounds.map((r) => r.exec).filter(Boolean)));
+  section("not-run / 中断原因", tally((x) => (x.notRun ? [x.notRun] : x.status === "中断" ? ["中断(无 result.json,进程已不在)"] : [])));
+  const multi = infos.filter((x) => x.roundsN > 1).length;
+  const byStatus = {};
+  for (const x of infos) byStatus[x.status] = (byStatus[x.status] ?? 0) + 1;
+  console.log(`\n多轮 run 占比:${multi} / ${infos.length}` + `\n结果分布:${Object.entries(byStatus).map(([k, v]) => `${k} ${v}`).join(" · ")}`);
+
+  const plan = gcPlan({ olderDays: 2, procs });
+  const wts = plan.clear.filter((c) => c.wt);
+  console.log(`\n可清 worktree ${wts.length} 个 / 共 ${gb(wts.reduce((s, c) => s + (c.bytes ?? 0), 0))} GB(piw gc 预览)`);
+}
+
+function printTable(rows) {
+  const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+  for (const r of rows) console.log(r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(w[i]))).join("  "));
+}
+
+// ── gc(清 run 留下的 worktree 与分支;默认只预览)─────────────────────────────────────
+const gb = (bytes) => (bytes / 1024 ** 3).toFixed(2);
+// 进程命令行(一行一条)。$PIW_PROCS_FILE 只给测试注入;没设就读 ps。指到一个读不到的文件就报出去 —— 读成空列表会让 gc 以为没有 run 在跑。
+function processArgs() {
+  const f = envv("PROCS_FILE");
+  if (f) {
+    if (!fs.existsSync(f)) die(`$PIW_PROCS_FILE 读不到:${f}`);
+    return readText(f).split("\n").filter(Boolean);
+  }
+  const r = spawnSync("ps", ["-eo", "args="], { encoding: "utf8" });
+  return (r.stdout || "").split("\n").filter(Boolean);
+}
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// 「正在跑」只认 piw / omd-lite 本体的 run / ask 进程:命令行里要有一个 basename 正好是 piw 或 omd-lite 的词,紧跟 run 或 ask。
+// 只看词里有没有 piw 字样不够:Everything 索引器的 find 把 /home/user/.omd-lite 和每个 worktree 路径都写在 -path 剪枝表里(19.10)
+const isPiwProc = (a) => {
+  const t = a.split(/\s+/);
+  return t.some((x, i) => /^(?:piw|omd-lite)$/.test(x.split("/").pop()) && /^(?:run|ask)$/.test(t[i + 1] ?? ""));
+};
+function hasProcess(procs, label, wt) {
+  const byWt = wt ? new RegExp(`${reEsc(wt)}(?=$|[/\\s"'])`) : null;
+  const byName = new RegExp(`--name\\s+${reEsc(label)}(?=$|\\s)`);
+  return procs.some((a) => isPiwProc(a) && ((byWt && byWt.test(a)) || byName.test(a)));
+}
+// 正在跑:有进程在用,或 meta 还没写结束时间且没超出墙钟上限(轮数 ×(默认墙钟 + 每道闸 15 分钟))
+function isRunning(l, m, procs) {
+  if (hasProcess(procs, l, m.worktree)) return true;
+  if (m.end_epoch) return false;
+  const limit = (m.max_rounds || 3) * (3600 + (m.gates?.length || 1) * GATE_TIMEOUT_MS / 1000);
+  return Date.now() / 1000 - startEpoch(l, m) < limit;
+}
+const g = (cwd, ...args) => spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+// 删 worktree 时连带删掉的被忽略文件里,哪些不是可再生的缓存(workhorse §17:视频素材就是这样没的)
+const REGEN = /(^|\/)(node_modules|\.next|\.venv[^/]*|\.turbo|\.cache|coverage|__pycache__|\.expo|dist|\.vitest|\.pytest_cache)(\/|$)|\.tsbuildinfo$/;
+function ignoredArtifacts(wt) {
+  return g(wt, "status", "--porcelain", "--ignored").stdout.split("\n")
+    .filter((x) => x.startsWith("!! ")).map((x) => x.slice(3)).filter((p) => !REGEN.test(p));
+}
+
+// ── 审查 run:判词按设计留在 run 分支上、不合进 main,所以「已合进」永远判不出,分支就一直留着。
+// 两条替代判据(任一成立即可清):分支上的判词逐字已进 main,或判词已进 main 上的合并稿。判不出就 null(照旧 quiet)。
+// 「被审提交已进 main」不是判据 —— 清分支就是把判词一起删掉,S8 合并说明里的「判词: <路径>」会读不到(17.10 r2)。
+const REVIEW_SPEC = /(^|\/)docs\/reviews\/[^/]+-brief(-\d+)?\.md$/;
+// 任务书正文里那一行(与 myapp scripts/dev/review-launch.mjs 的 BRIEF_TARGET_RE 同一份正则);判词判据不用它了,留给别的调用方
+function reviewTarget(text) {
+  const m = /^审查对象:分支\s*`([^`]+)`\s*@\s*`([0-9a-f]{7,40})`/m.exec(text);
+  return m ? { branch: m[1], sha: m[2] } : null;
+}
+// 分支相对 base_sha 新增/改动的 docs/reviews/ 文件里,哪些是判词(任务书 x-brief.md / x-brief-2.md 不算)
+const REVIEW_BRIEF = /-brief(-\d+)?(\.[a-z0-9]+)?\.md$/;
+// 分支上的判词份数 —— 全部逐字在 main 上才返回份数,否则 0(判词只在分支上 = 清掉就是丢证据)
+function verdictsOnMain(repo, branch, baseSha) {
+  if (!branch || !baseSha) return 0;
+  // quotePath=false:非 ASCII 文件名 git 默认 C 转义输出,那样一条路径在下一行 rev-parse 里读不回来
+  const files = g(repo, "-c", "core.quotePath=false", "diff", "--name-only", `${baseSha}..${branch}`, "--", "docs/reviews/").stdout.split("\n")
+    .map((s) => s.trim()).filter((s) => s && !REVIEW_BRIEF.test(s));
+  // rev-parse 找不到对象时会把参数原样打到 stdout,所以只认 exit 0 的那行(main 上没有这个文件 = 不等)
+  const blob = (f, ref) => { const r = g(repo, "rev-parse", `${ref}:${f}`); return r.status === 0 ? r.stdout.trim() : null; };
+  if (!files.length) return 0;
+  for (const f of files) { const b = blob(f, branch); if (!b || b !== blob(f, "main")) return 0; }
+  return files.length;
+}
+function reviewReason(repo, it, m) {
+  const n = verdictsOnMain(repo, it.branch, m.base_sha);
+  if (n) return `审查 run,判词 ${n} 份已逐字在 main`;
+  const slug = path.basename(m.spec).replace(/-brief(-\d+)?\.md$/, "");
+  const merged = `docs/reviews/${slug}.merged.md`;
+  return fs.existsSync(path.join(repo, merged)) ? `审查 run,判词已进合并稿 ${merged}` : null;
+}
+
+const shq = (s) => /^[\w./@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+const ORPHAN_ASIDE = /^omdl-.+\.orphan-\d{8}T\d{6}Z$/;
+
+function gcPlan({ olderDays, procs }) {
+  const clear = [], keep = [], aside = [];
+  let quiet = 0;
+  const metas = new Map(); // label → meta
+  for (const l of runLabels()) { const m = readMeta(l); if (m?.repo) metas.set(l, m); }
+  const repos = [...new Set([...metas.values()].map((m) => m.repo))].filter((r) => fs.existsSync(r));
+  for (const repo of repos) {
+    const wts = new Map(); // path → branch
+    let cur = null;
+    for (const line of g(repo, "worktree", "list", "--porcelain").stdout.split("\n")) {
+      if (line.startsWith("worktree ")) { cur = line.slice(9); wts.set(cur, null); }
+      else if (line.startsWith("branch ") && cur) wts.set(cur, line.slice(7).replace(/^refs\/heads\//, ""));
+    }
+    const branches = new Map();
+    for (const line of g(repo, "for-each-ref", "refs/heads/omdl/", "--format=%(refname:short) %(objectname)").stdout.split("\n")) {
+      const [b, sha] = line.split(" "); if (b) branches.set(b, sha);
+    }
+    // 条目 = omdl/<label> 分支 ∪ omdl-<label> worktree ∪ meta 记的 worktree 目录
+    const items = new Map(); // label → { wt, branch, leftoverDir }
+    const item = (l) => { if (!items.has(l)) items.set(l, { label: l }); return items.get(l); };
+    for (const b of branches.keys()) item(b.slice(5)).branch = b;
+    for (const [p, b] of wts) {
+      if (ORPHAN_ASIDE.test(path.basename(p))) { aside.push({ repo, where: p }); continue; }
+      if (b?.startsWith("omdl/")) Object.assign(item(b.slice(5)), { wt: p, branch: b });
+      else if (path.basename(p).startsWith("omdl-") && !b) item(path.basename(p).slice(5)).wt = p;
+    }
+    for (const [l, m] of metas) {
+      if (m.repo !== repo || !m.worktree || wts.has(m.worktree) || !fs.existsSync(m.worktree)) continue;
+      item(l).leftoverDir = m.worktree;
+    }
+    const bases = (m) => [...new Set([m?.base, "main"].filter(Boolean))];
+    for (const it of items.values()) {
+      const m = metas.get(it.label);
+      const where = it.wt ?? it.leftoverDir ?? it.branch;
+      const k = (reason) => keep.push({ repo, ...it, where, reason });
+      const c = (reason) => clear.push({ repo, ...it, where, reason });
+      if (it.leftoverDir && !it.wt) {
+        if (fs.readdirSync(it.leftoverDir).length === 0) c("残留空目录(不是 worktree)");
+        else k("目录还在但不是 git worktree,里面有东西 —— 人看");
+        if (!it.branch) continue;
+      }
+      if (m && isRunning(it.label, m, procs)) { k("正在跑"); continue; }
+      if (it.wt && hasProcess(procs, it.label, it.wt)) { k("正在跑(有进程在用)"); continue; }
+      const res = m && (m.result ?? (fs.existsSync(path.join(RUNS, it.label, "result.json"))
+        ? JSON.parse(readText(path.join(RUNS, it.label, "result.json"))) : null));
+      const dirty = it.wt ? g(it.wt, "status", "--porcelain").stdout.trim() !== "" : false;
+      const art = it.wt ? ignoredArtifacts(it.wt) : [];
+      let reason = null;
+      if (!m && it.wt) {
+        if (dirty) { k("孤儿 worktree(run 记录已不存在)但有未提交改动"); continue; }
+        reason = "孤儿 worktree(run 记录已不存在)";
+      } else {
+        const into = it.branch && bases(m).find((b) => g(repo, "merge-base", "--is-ancestor", it.branch, b).status === 0);
+        // 没有提交的分支天然是 base 的祖先 —— 活儿可能全在未提交改动里,脏的不按「已合进」清
+        if (into && !dirty) reason = `已合进 ${into}${m && branches.get(it.branch) === m.base_sha ? "(分支无提交)" : ""}`;
+        // 已进 main、分支有提交、还剩未提交改动:先归档再清(19.10 一律跳过,攒了 45 个);进的是别的 base 不算,那条 base 未必进 main
+        if (into === "main" && dirty && !(m && branches.get(it.branch) === m.base_sha)) { reason = "已合进 main,未提交改动先归档"; it.archive = true; }
+        if (!reason && m) {
+          const status = res?.gates ?? "中断";
+          const days = (Date.now() / 1000 - (m.end_epoch ?? startEpoch(it.label, m))) / 86400;
+          if (["fail", "not-run", "中断"].includes(status) && days >= olderDays) reason = `${status},${days.toFixed(1)} 天前结束`;
+        }
+        if (!reason && into) { k(`分支已在 ${into} 里但 worktree 有未提交改动`); continue; }
+        // 在「已合进 / fail 过期」都判不出时才轮到审查 run(脏 worktree 的 keep 照旧先生效)
+        if (!reason && m?.spec && REVIEW_SPEC.test(m.spec)) reason = reviewReason(repo, it, m);
+      }
+      if (!reason) { quiet++; continue; }
+      if (art.length) { k(`${reason},但有被忽略的产物(§17):${art.slice(0, 3).join(" ")}${art.length > 3 ? " …" : ""}`); continue; }
+      c(reason);
+    }
+  }
+  for (const x of [...clear, ...aside]) {
+    const d = x.wt ?? x.leftoverDir ?? (aside.includes(x) ? x.where : null);
+    if (!d) continue;
+    const r = spawnSync("du", ["-sb", "--exclude=node_modules", d], { encoding: "utf8" });
+    x.bytes = Number((r.stdout || "0").split("\t")[0]) || 0;
+  }
+  return { clear, keep, quiet, aside };
+}
+
+// 未提交改动 + 未跟踪文件 + HEAD,够在别处重放
+function archiveWt(c) {
+  const dir = path.join(path.dirname(RUNS), "archive", `gc-${new Date().toISOString().slice(0, 10)}`, c.label);
+  fs.mkdirSync(dir, { recursive: true });
+  const d = g(c.wt, "diff", "--binary", "HEAD");
+  if (d.status !== 0) return null;
+  fs.writeFileSync(path.join(dir, "diff.patch"), d.stdout);
+  fs.writeFileSync(path.join(dir, "head"), g(c.wt, "rev-parse", "HEAD").stdout);
+  const u = g(c.wt, "ls-files", "-z", "--others", "--exclude-standard").stdout;
+  if (u && spawnSync("tar", ["-czf", path.join(dir, "untracked.tgz"), "--null", "-T", "-"], { cwd: c.wt, input: u }).status !== 0) return null;
+  return dir;
+}
+
+function gc(argv) {
+  let olderDays = 2, apply = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--apply") apply = true;
+    else if (argv[i] === "--older-than") { olderDays = Number(argv[++i]); if (!(olderDays >= 0)) die("--older-than 要天数"); }
+    else die(`未知参数 ${argv[i]}\n${USAGE}`);
+  }
+  const { clear, keep, quiet, aside } = gcPlan({ olderDays, procs: processArgs() });
+  const wts = clear.filter((c) => c.wt || c.leftoverDir);
+  const total = wts.reduce((s, c) => s + (c.bytes ?? 0), 0);
+  console.log(`## 可清(worktree ${wts.length} 个 · ${gb(total)} GB 不含硬链接的 node_modules · 分支 ${clear.filter((c) => c.branch).length} 个)\n`);
+  printTable([["worktree / 分支", "原因", "GB"], ...clear.map((c) => [c.where, c.reason, c.bytes == null ? "-" : gb(c.bytes)])]);
+  console.log(`\n## 不碰(${keep.length} 个有保护理由)\n`);
+  if (keep.length) printTable([["worktree / 分支", "原因"], ...keep.map((c) => [c.where, c.reason])]);
+  if (aside.length) {
+    console.log(`\n## 挪开待人看(${aside.length} 个 · ${gb(aside.reduce((s, x) => s + (x.bytes ?? 0), 0))} GB;起片时证明不了没人在用而挪开,--apply 不删)\n`);
+    printTable([["worktree", "GB", "看过后人手删"], ...aside.map((x) => [x.where, gb(x.bytes ?? 0), `git -C ${shq(x.repo)} worktree remove --force ${shq(x.where)}`])]);
+  }
+  console.log(`\n其余 ${quiet} 个(pass 未合并 / 未到期限):不动。--older-than ${olderDays} 天。`);
+  if (!apply) { console.log("\n预览,没删任何东西。确认后加 --apply。"); return; }
+  for (const c of clear) {
+    if (c.archive) {
+      const dir = archiveWt(c);
+      if (!dir) { console.error(`跳过 ${c.where}:未提交改动归档失败`); continue; }
+      console.log(`归档 ${c.where} → ${dir}`);
+    }
+    if (c.wt) {
+      const r = spawnSync("git", ["-C", c.repo, "worktree", "remove", "--force", c.wt], { stdio: "inherit" });
+      if (r.status !== 0) { console.error(`跳过分支 ${c.branch}:worktree 删除失败`); continue; }
+    } else if (c.leftoverDir) fs.rmdirSync(c.leftoverDir);
+    if (c.branch) spawnSync("git", ["-C", c.repo, "branch", "-D", c.branch], { stdio: "inherit" });
+  }
+  for (const repo of new Set(clear.map((c) => c.repo))) spawnSync("git", ["-C", repo, "worktree", "prune"], { stdio: "inherit" });
+  console.log(`\n已清 worktree ${wts.length} 个、分支 ${clear.filter((c) => c.branch).length} 个(run 记录保留)`);
+}
+
+// --models-json(otherapp docs/plan/2026-10-25-real-context-window-sdd.md D-2):这片自己的 pi agent 目录 <run>/agent/,
+// 真目录逐项软链进来、只把 models.json 换成给定文件的拷贝;执行体带 PI_CODING_AGENT_DIR(经 SANDBOX_ENV_PASS 进沙箱),
+// 所有轮次共用这个 env。没给就什么都不加(meta 记 null),不碰全局 models.json。
+function modelsJsonEnv({ o, env, meta, outDir, realDir = env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent") }) {
+  meta.models_json = null;
+  meta.models_json_sha256 = null;
+  if (!o.models_json) return {};
+  const file = path.resolve(o.models_json);
+  if (!fs.existsSync(file)) throw new Error(`--models-json 不存在:${file}`);
+  const dir = path.join(outDir, "agent");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  for (const n of fs.readdirSync(realDir)) if (n !== "models.json") fs.symlinkSync(path.join(realDir, n), path.join(dir, n));
+  fs.copyFileSync(file, path.join(dir, "models.json"));
+  meta.models_json = file;
+  meta.models_json_sha256 = require("node:crypto").createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  return { PI_CODING_AGENT_DIR: dir, SANDBOX_ENV_PASS: piw.mergeEnvPass(env.SANDBOX_ENV_PASS, "PI_CODING_AGENT_DIR") };
+}
+
+// 测试 require 本文件只为拿 allowedFromSpec:不该被分派成一次 CLI 调用(打 USAGE 再 exit 2)
+const asCli = require.main === module;
+module.exports = { allowedFromSpec, modelsJsonEnv, wallClock, verdictFromGateLogs };
+// 并发上限的硬闸(owner 20.10):内核 flock 占槽,锁 fd 被整棵进程树继承,
+// 全树退出才放锁(注意:后台残留的孙进程也会占槽)。墙钟跳、pid 复用不影响。
+// 槽满退 222;不排队,起片方下一拍再来。
+// 不变量:被包的子进程绝不能以 222 退出,否则会被误判为槽满而重跑。
+const SLOT_FULL = 222;
+
+function runInSlot() {
+  const dir = envv("RUN_SLOTS") || path.join(os.homedir(), ".omd-lite", "run-slots");
+  const n = Number.parseInt(envv("MAX_RUNNING"), 10);
+  // 8 → 16(owner 27.10 要拉高 MiniMax 并发;WSL 内存上限 80G、给 Windows 留 15G):mem-samples.tsv 10-25 起 2075 次采样,8 槽全占时 MemAvailable 最低 35.6G,卡并发的是这个数不是内存。
+  // 兜底:可用内存低于下限(默认 8G,PIW_MEM_FLOOR_GB)就按满槽退 222,不起。
+  const max = n > 0 ? n : 16;
+  const floor = Number(envv("MEM_FLOOR_GB") || 8);
+  const kb = Number((fs.readFileSync(envv("MEMINFO") || "/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)/m) || [])[1]);
+  if (kb && kb < floor * 1048576) {
+    process.stderr.write(`piw: 满槽(可用内存 ${(kb / 1048576).toFixed(1)}G < 下限 ${floor}G),不起\n`);
+    process.exit(SLOT_FULL);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+
+  const cmd = [process.execPath, ...process.execArgv, __filename, ...process.argv.slice(2)];
+  for (let k = 0; k < max; k++) {
+    const r = spawnSync("flock", ["-n", "-E", String(SLOT_FULL), path.join(dir, String(k)), ...cmd], {
+      stdio: "inherit",
+      env: { ...process.env, PIW_SLOT: String(k), OMD_LITE_SLOT: String(k) },
+    });
+    if (r.error) {
+      process.stderr.write(`piw: 无法执行 flock(${r.error.code}),需要 util-linux\n`);
+      process.exit(1);
+    }
+    if (r.signal) process.kill(process.pid, r.signal); // 原样转发死因
+    if (r.status !== SLOT_FULL) process.exit(r.status);
+  }
+  process.stderr.write(`piw: 满槽(${max} 个 run 在跑,槽目录 ${dir}),不起\n`);
+  process.exit(SLOT_FULL);
+}
+const [cmd, ...rest] = asCli ? process.argv.slice(2) : [];
+if (cmd === "run" && !envv("SLOT")) runInSlot();
+else if (cmd === "run") run(parseArgs(rest)).catch((e) => die(e.stack || String(e)));
+else if (cmd === "report") report(rest);
+else if (cmd === "daily") {
+  const i = rest.indexOf("--day"), day = i >= 0 ? rest[i + 1] : undefined;
+  const r = require("../lib/report.js").report({ day });
+  if (rest.includes("--json")) console.log(JSON.stringify(r, null, 2)); else process.stdout.write(r.text);
+}
+else if (cmd === "yield") {
+  const v = (f) => { const i = rest.indexOf(f); return i >= 0 ? rest[i + 1] : undefined; };
+  const r = require("../lib/yield.js").yieldReport({ since: v("--since"), until: v("--until"), repo: v("--repo") });
+  if (rest.includes("--json")) console.log(JSON.stringify(r, null, 2)); else process.stdout.write(r.text);
+}
+else if (cmd === "mem-sample") memSample();
+else if (cmd === "balance") balance().catch((e) => die(e.message));
+else if (cmd === "clean") clean(rest);
+else if (cmd === "retro") retro(rest);
+else if (cmd === "sparse-plan") {
+  // 只看不建:某份任务书在某个 base 上会被怎么稀疏检出
+  const o = parseArgs(rest);
+  const repo = path.resolve(o.repo);
+  const plan = sparsePlan(repo, git(repo, "rev-parse", `${o.base}^{commit}`).trim(), o.spec, o.sparse_exclude ?? envv("SPARSE_EXCLUDE") ?? SPARSE_DEFAULT);
+  console.log(JSON.stringify(plan, null, 2));
+}
+else if (cmd === "gc") gc(rest);
+else if (cmd === "ask") ask(parseArgs(rest)).catch((e) => die(e.stack || String(e)));
+else if (cmd === "agent") require("../lib/agent.js").agent(rest, { stdin: readStdin }).then((c) => process.exit(c), (e) => die(e.stack || String(e)));
+else if (cmd === "cron-report") require("../lib/cron-report.js").main(rest).then((c) => process.exit(c ?? 0), (e) => die(e.stack || String(e)));
+else if (asCli) die(USAGE);
+
+// 每分钟一行容量采样(piw-mem-sample.timer):<epoch>\t<MemAvailable kB>\t<被占的 run 槽数>。槽是否被占用 flock -n 探测。
+function memSample() {
+  const kb = (fs.readFileSync("/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)/m) || [])[1];
+  const dir = envv("RUN_SLOTS") || path.join(os.homedir(), ".omd-lite", "run-slots");
+  let names = []; try { names = fs.readdirSync(dir).filter((f) => /^\d+$/.test(f)); } catch {}
+  const held = names.filter((f) => spawnSync("flock", ["-n", path.join(dir, f), "true"]).status !== 0).length;
+  const file = process.env.PIW_MEM_SAMPLES || path.join(os.homedir(), ".omd-lite", "mem-samples.tsv");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const row = `${Math.floor(Date.now() / 1000)}\t${kb ?? ""}\t${held}`;
+  fs.appendFileSync(file, row + "\n");
+  console.log(row);
+}
+
+// DeepSeek 账户余额快照:piw daily 用相邻快照的降幅当真实扣费,与台账对账。key 取 DEEPSEEK_API_KEY,没有就取 pi 的 auth.json。
+async function balance() {
+  let key = process.env.DEEPSEEK_API_KEY;
+  if (!key) try { key = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi/agent/auth.json"), "utf8")).deepseek?.key; } catch {}
+  if (!key) throw new Error("没有 DeepSeek key(DEEPSEEK_API_KEY 或 ~/.pi/agent/auth.json 的 deepseek.key)");
+  const res = await fetch("https://api.deepseek.com/user/balance", { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`GET /user/balance ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const b = await res.json();
+  const cny = (b.balance_infos || []).find((x) => x.currency === "CNY") || {};
+  const row = { at: Math.floor(Date.now() / 1000), cny: Number(cny.total_balance), granted: Number(cny.granted_balance), toppedUp: Number(cny.topped_up_balance), available: b.is_available };
+  const dir = process.env.PIW_BALANCE_DIR || path.join(os.homedir(), ".omd-lite", "balance");
+  const d = new Date(row.at * 1000);
+  const file = path.join(dir, `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}.jsonl`);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.appendFileSync(file, JSON.stringify(row) + "\n");
+  console.log(JSON.stringify(row));
+}
+
+/** models.json 里该供应商的 apiKey 若写成 "$VAR",返回 VAR;auth.json 已有凭证的(pi 自己读)不需要;其余内置供应商按约定名。 */
+function providerKeyVar(model, { peek = false } = {}) {
+  const provider = model.split("/")[0];
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi/agent/models.json"), "utf8"));
+    const k = m.providers?.[provider]?.apiKey;
+    if (typeof k === "string" && k.startsWith("$")) return k.slice(1);
+  } catch {}
+  if (peek) return { deepseek: "DEEPSEEK_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" }[provider]; // dry-run:不碰 auth.json
+  try {
+    if (JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi/agent/auth.json"), "utf8"))[provider]) return undefined;
+  } catch {}
+  return { deepseek: "DEEPSEEK_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" }[provider];
+}
+function readEnvVar(file, name) {
+  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (m && m[1] === name) return m[2].trim().replace(/^(['"])(.*)\1$/, "$2");
+  }
+}

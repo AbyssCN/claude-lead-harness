@@ -1,0 +1,29 @@
+# Merge into ~/.config/herdr/config.toml, then press prefix+shift+r in the client.
+# `herdr server reload-config` does NOT reload client-side settings such as copy_on_select.
+onboarding = false
+
+[ui]
+# The default (true) writes every mouse selection to the system clipboard, which silently
+# replaces a screenshot you just took, and Claude Code then cannot paste it.
+copy_on_select = false
+show_agent_labels_on_pane_borders = true
+status_indicators = "dots"
+
+[ui.toast]
+delivery = "herdr"
+
+[keys]
+# Alt keys so moving between sessions needs no prefix.
+focus_pane_left = ["prefix+h", "alt+a"]
+focus_pane_down = ["prefix+j", "alt+s"]
+focus_pane_up = ["prefix+k", "alt+w"]
+focus_pane_right = ["prefix+l", "alt+d"]
+previous_tab = ["prefix+p", "alt+q"]
+next_tab = ["prefix+n", "alt+e"]
+new_tab = ["prefix+c", "alt+shift+c"]
+split_vertical = ["prefix+v", "alt+shift+v"]
+split_horizontal = ["prefix+minus", "alt+shift+b"]
+close_pane = ["prefix+x", "alt+shift+n"]
+zoom = ["prefix+z", "alt+shift+z"]
+goto = ["prefix+g", "alt+shift+g"]
+last_pane = "alt+shift+t"

@@ -1,0 +1,17 @@
+--- a/prune-agent-worktrees.sh
++++ b/prune-agent-worktrees.sh
+@@ -49,7 +49,13 @@
+     fi
+     name=$(basename "$wt")
+     if [[ $name == omdl-* ]] && [ ! -f "$HOME/.omd-lite/runs/${name#omdl-}/result.json" ]; then
+-      keep "omd-lite run 未结束(无 result.json)"; continue
++      # 续跑(omd-lite/piw run --reuse-worktree)的 run 另起 label(<原>-r2),在同一个 worktree 里写自己的 result.json:
++      # 任何 meta.worktree 指向这个 worktree 的 run 有 result.json,就算收尾了(链式 -r2 -> -r3 也成立)
++      resumed_done=
++      for m in $(grep -lF "\"worktree\": \"$wt\"" "$HOME"/.omd-lite/runs/*/meta.json 2>/dev/null); do
++        [ -f "$(dirname "$m")/result.json" ] && { resumed_done=1; break; }
++      done
++      [ -n "$resumed_done" ] || { keep "omd-lite run 未结束(无 result.json)"; continue; }
+     fi
+     # 活跃度: 目录 mtime 与该 worktree 的 index mtime 取较新者
+     gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)

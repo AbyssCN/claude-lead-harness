@@ -72,7 +72,7 @@ export function paneRows(o: {
     push('')
     if (view.runs !== null) push(`run:${view.runs}`)
     if (view.gateSlots !== null) push(`闸槽:${view.gateSlots}`, 'dim')
-    if (view.diskFreeGb !== null) push(`磁盘:${view.diskFreeGb} GB`, view.diskFreeGb < (view.diskMinGb ?? 50) ? 'error' : 'dim')
+    if (view.diskFreeGb !== null) push(`D 盘:${view.diskFreeGb} GB`, view.diskFreeGb < 50 ? 'error' : 'dim')
   }
   push(fit(goal.path, columns), 'dim')
   return rows

@@ -1,0 +1,7 @@
+[Unit]
+Description=piw balance:DeepSeek 账户余额快照,写 ~/.omd-lite/balance/<日>.jsonl(piw daily 对账用)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/share/fnm/aliases/default/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash -c 'node %h/repos/piw/bin/piw balance'

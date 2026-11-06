@@ -46,7 +46,7 @@ export type Panel = {
   autoOpenedFor: string
 }
 
-/** An omd-lite run launched from this session (its meta.json names the session). Written by bin/omd-scan.mjs. */
+/** An omd-lite run launched from this session (its meta.json names the session). Mapped from delegate's `$.delegate.runs()`. */
 export type OmdRun = {
   id: string
   label: string

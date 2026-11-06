@@ -1,0 +1,5 @@
+# Only if you run herdr inside tmux.
+# `on` encodes Ctrl+V as CSI u, which herdr drops, so image paste stops working.
+set -s extended-keys off
+set -g allow-passthrough on
+set -sg escape-time 10

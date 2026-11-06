@@ -1,6 +1,8 @@
 # scripts
 
-Launchers that run cheap executor models (MiniMax Code `mcode`, or `omd-lite` with pi) in isolated git worktrees inside VibeTunnel, so you can watch and steer them from your phone.
+`install.sh` 配本机,`init-repo.sh <仓>` 给项目加文件,`send-to-ticket` 是总管给单会话发提示的可靠入口,`publish/` 是维护者从私有源生成本仓的工具。下面讲执行会话的启动脚本。VibeTunnel 可选,没有 `vt` 时 `omdl-launch.sh` 直接运行。
+
+Launchers that run cheap executor models (MiniMax Code `mcode`, or `piw` with pi) in isolated git worktrees inside VibeTunnel, so you can watch and steer them from your phone.
 
 这里是 lead(Claude)把切好的片交给便宜执行模型的几支启动脚本。所有执行会话都跑在 VibeTunnel(`vt`)里,手机浏览器打开 VibeTunnel 网页就能实时看输出、插话、打断。
 
@@ -12,8 +14,8 @@ Launchers that run cheap executor models (MiniMax Code `mcode`, or `omd-lite` wi
 | `tmux` | `mgo` 的无人值守会话(独立服务 `tmux -L mgo`) |
 | `vt` / [VibeTunnel](https://github.com/amantus-ai/vibetunnel) | 把终端会话发布到网页;手机经 Tailscale / 局域网访问 |
 | `mcode` | MiniMax Code CLI(交互会话 + `mcode exec`) |
-| `pi` | omd-lite 的默认执行器 |
-| `node` ≥ 23 | 跑 `omd-lite`(只依赖标准库) |
+| `pi` | piw 的默认执行器 |
+| `node` ≥ 23 | 跑 `piw`(只依赖标准库) |
 | `systemd --user` | `mgo` 把 tmux 放进独立 scope;`mgo after` 用 `systemd-run` 等待 |
 
 ## 文件
@@ -22,7 +24,7 @@ Launchers that run cheap executor models (MiniMax Code `mcode`, or `omd-lite` wi
 |---|---|
 | `agent-wt.sh <name> [base]` | 给一个执行者建独占 worktree(分支 `agent/<name>`),软链 node_modules / `.venv*` 免安装,打印路径 |
 | `mcode.sh <name> <任务书> [base]` | 建 worktree → 在里面 `vt mcode "<开工提示>"`,起一个可看可插话的交互执行会话 |
-| `omdl-launch.sh <name> <base> <任务书> ["闸" ...]` | `vt omd-lite run …`:非交互,跑完闸循环出结果 |
+| `omdl-launch.sh <name> <base> <任务书> ["闸" ...]` | `vt piw run …`:非交互,跑完闸循环出结果 |
 | `mgo <goal.md>` | 用一份 goal 文件起一个通宵无人值守的 mcode 会话 |
 
 ## 1. mcode 在 VibeTunnel 里起(`mcode.sh`)
@@ -53,12 +55,12 @@ mgo after mg-refactor-billing goals/next.md -d …       # 前一个 goal 完成
 - **tmux -L mgo + systemd scope**:用独立的 tmux 服务,并经 `systemd-run --user --scope` 起。默认 tmux 如果是从某个 systemd 服务(例如跑 Claude 的服务)里起的,会挂在那个服务的 cgroup 下,服务一重启 mcode 就跟着被杀。
 - 会话里跑 `vt mcode`,等到 TUI 出现后用 `send-keys` 发 `/goal 先逐字读完 <goal 文件> 再动手…`,确认出现 `Goal · Active` 才算起好(长行输入后 Enter 可能被吞,会重按最多 3 次)。
 - 会话名默认 `mg-<goal 文件名>`。桌面接入 `tmux -L mgo a -t <会话名>`;手机打开 `$MGO_VT_URL`。
-- **`mgo after`**:在独立的 systemd 单元里每 2 分钟看一次前一个会话,出现 `Goal complete` 且没有 `omd-lite run` 在跑时起下一个;最多等 12 小时。不占 Claude 额度,Claude 会话断了也照样等。
+- **`mgo after`**:在独立的 systemd 单元里每 2 分钟看一次前一个会话,出现 `Goal complete` 且没有 `piw run` 在跑时起下一个;最多等 12 小时。不占 Claude 额度,Claude 会话断了也照样等。
 - **早上**:lead 读 goal 文件指定的报告,再读 diff、跑闸验收;不凭报告信。日志在 `$MGO_LOG`。
 
 环境变量:`MGO_VT_URL`(默认 `http://localhost:4020`,通常换成你的 Tailscale / 局域网地址)· `MGO_VT_UNIT`(VibeTunnel 的 systemd --user 单元名,默认 `vibetunnel`;设为空不自动拉起)· `MGO_LOG`(默认 `~/.local/state/mgo.log`)。
 
-## 3. omd-lite 启动(`omdl-launch.sh`)
+## 3. piw 启动(`omdl-launch.sh`)
 
 ```bash
 export OMD_LITE_REPO=~/repos/<your-app>
@@ -69,10 +71,10 @@ sleep 10
 nohup scripts/omdl-launch.sh s2 main docs/plan/s2.md &
 ```
 
-- **闸**:`OMD_LITE_SLICE_GATE`(如果设了)是第一道,命令行后面的每个参数各是一道;按序跑、首个失败即停,失败输出尾 80 行回灌给执行器,最多 `OMD_LITE_MAX_ROUNDS` 轮(默认 4)。任务书里写一行 `允许改动:` 还会判越界改动。细节见 `../omd-lite/README.md`。
-- **前台阻塞**到 run 结束 —— 从 agent / 脚本里一律后台起,之后轮询 `~/.omd-lite/runs/<name>/meta.json`(`wall_seconds` 出现 = 结束),结果看 `result.json`。终端输出在 `$OMD_LITE_LOG_DIR/<name>.log`(默认 `/tmp/omdl-logs`)。
+- **闸**:`OMD_LITE_SLICE_GATE`(如果设了)是第一道,命令行后面的每个参数各是一道;按序跑、首个失败即停,失败输出尾 80 行回灌给执行器,最多 `OMD_LITE_MAX_ROUNDS` 轮(默认 4)。任务书里写一行 `允许改动:` 还会判越界改动。细节见 `../piw/README.md`。
+- **前台阻塞**到 run 结束 —— 从 agent / 脚本里一律后台起,之后轮询 `~/.piw/runs/<name>/meta.json`(`wall_seconds` 出现 = 结束),结果看 `result.json`。终端输出在 `$OMD_LITE_LOG_DIR/<name>.log`(默认 `/tmp/omdl-logs`)。
 - **错开 ≥ 10 秒**:同一秒起的多个 `vt` 会撞 IPC socket(`Server.listen` 报错,run 目录都不建)。
 - 任务书必须已提交进 `<base>`;失败用 `<name>-r2` 重来。
 - 全量测试闸要经一个全机加锁的包装脚本(`flock`),否则并行一多负载爆掉、大批墙钟超时。
 
-环境变量:`OMD_LITE_REPO` · `OMD_LITE_BIN`(默认 `../omd-lite/bin/omd-lite`)· `OMD_LITE_MODEL`(默认 `minimax-cp/MiniMax-M3.1-Flash-Preview`,provider 名要和你 `~/.pi/agent/models.json` 里的一致)· `OMD_LITE_PROMPT`(默认 `omd-leaf`)· `OMD_LITE_SLICE_GATE` · `OMD_LITE_MAX_ROUNDS` · `WALL`(秒,默认 3600)· `OMD_LITE_LOG_DIR`;omd-lite 本身还读 `OMD_LITE_ENV_FILE` / `OMD_LITE_FALLBACK_MODEL` / `OMD_LITE_GUARD_BIN` / `OMD_LITE_BRIEF`。
+环境变量:`OMD_LITE_REPO` · `OMD_LITE_BIN`(默认 `../piw/bin/piw`)· `OMD_LITE_MODEL`(默认 `minimax-cp/MiniMax-M3.1-Flash-Preview`,provider 名要和你 `~/.pi/agent/models.json` 里的一致)· `OMD_LITE_PROMPT`(默认 `omd-leaf`)· `OMD_LITE_SLICE_GATE` · `OMD_LITE_MAX_ROUNDS` · `WALL`(秒,默认 3600)· `OMD_LITE_LOG_DIR`;piw 本身还读 `OMD_LITE_ENV_FILE` / `OMD_LITE_FALLBACK_MODEL` / `OMD_LITE_GUARD_BIN` / `OMD_LITE_BRIEF`。

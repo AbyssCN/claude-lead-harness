@@ -1,10 +1,42 @@
 {
   "name": "cue",
-  "version": "0.1.0",
-  "description": "提词:每次回答后,站在你的位置写好下一条完整 prompt;空输入框按 1 或点 Enhance 写进草稿,从不替你发送。/enhance 把你的粗稿改写成完整结构",
+  "version": "0.4.0",
+  "description": "提词:每次回答后,站在你的位置写好下一条完整 prompt;终端里空输入框按 1 或点 Enhance 写进草稿(不发送),手机上弹窗让你选 发送 / 方向 B / 改写 / 放弃。/enhance 把你的粗稿改写成完整结构",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "engine": { "type": "string", "title": "生成方式", "description": "fork:主模型带完整上下文(命中主线缓存,最贴题);haiku:只看最后一条回答(便宜,较浅);off:回答后不自动生成(/enhance 仍可用)", "default": "fork", "options": ["fork", "haiku", "off"] },
-    "minChars": { "type": "number", "title": "最短回答(字符)", "description": "回答短于这个字符数就不生成", "default": 80 }
+    "engine": {
+      "type": "string",
+      "title": "生成方式",
+      "description": "fork:主模型带完整上下文(命中主线缓存,最贴题);haiku:只看最后一条回答(便宜,较浅);off:回答后不自动生成(/enhance 仍可用)",
+      "default": "fork",
+      "options": [
+        "fork",
+        "haiku",
+        "off"
+      ]
+    },
+    "minChars": {
+      "type": "number",
+      "title": "最短回答(字符)",
+      "description": "回答短于这个字符数就不生成",
+      "default": 80
+    },
+    "popup": {
+      "type": "string",
+      "title": "手机弹窗",
+      "description": "auto:有手机(Remote)挂着时,生成完弹窗确认,终端独用时只出按钮;always:总是弹窗;off:从不弹窗",
+      "default": "auto",
+      "options": [
+        "auto",
+        "always",
+        "off"
+      ]
+    },
+    "outbox": {
+      "type": "string",
+      "title": "发件箱命令",
+      "description": "敏感草稿发到 owner 手机用的命令(JSON 数组,stdin 每行 {dedupKey,text,kind});[] 表示不发",
+      "default": "[\"~/.bun/bin/bun\",\"~/.local/bin/freezewatch-outbox.ts\",\"enqueue\"]"
+    }
   }
 }

@@ -22,7 +22,7 @@ export const register: Register = on => {
       const labels = [...new Set(hits.map(h => h.label))].join('、')
       await $.prompt.fill({ text: redact(e.text, hits), mode: 'replace' })
       return {
-        drop: `prompt-guard:消息里有${labels},没有发出。去掉密钥的版本已放回输入框;密钥请放密码管理器 / secret store 或环境变量,在 prompt 里写「用环境变量 X」。确实要发,在开头加 #allow-secret。`,
+        drop: `prompt-guard:消息里有${labels},没有发出。去掉密钥的版本已放回输入框;密钥请放 vault.example.com 或环境变量,在 prompt 里写「用 vault 里的 X」。确实要发,在开头加 #allow-secret。`,
       }
     }
 

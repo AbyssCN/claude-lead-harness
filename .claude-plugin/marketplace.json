@@ -35,6 +35,10 @@
     {
       "name": "savvy-progress",
       "source": "./mods/savvy-progress"
+    },
+    {
+      "name": "cache-clock",
+      "source": "./mods/cache-clock"
     }
   ]
 }

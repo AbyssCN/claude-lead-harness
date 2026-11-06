@@ -1,0 +1,10 @@
+[Unit]
+Description=每小时整点一次 DeepSeek 余额快照
+
+[Timer]
+OnCalendar=*-*-* *:00:00
+Persistent=true
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

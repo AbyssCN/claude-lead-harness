@@ -11,7 +11,7 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
-// omd-lite runs launched from this session, as bin/omd-scan.mjs reads them; ids the band was dismissed for.
+// omd-lite runs launched from this session, as `$.delegate.runs()` reports them; ids the band was dismissed for.
 const omd = atom({ plugin: 'savvy-progress', key: 'omd' } as const, [])
 const omdDismissed = atom({ plugin: 'savvy-progress', key: 'omdDismissed' } as const, [])
 
@@ -591,7 +591,7 @@ const CRAB_COLORS: Record<string, string> = { c: CLAY, k: INK }
 const WAVE_FRAMES = ['▂▄▆▄▂', '▃▆▄▂▄', '▄▄▂▄▆', '▆▂▄▆▄', '▄▄▆▄▂']
 const WAVE_COLORS = ['#F23F5D', '#F5505A', '#F96650', '#FC7D46', '#FF9A3C']
 
-const isMinimax = (r: OmdRun): boolean => r.executor === 'mcode' || /minimax/i.test(r.model)
+const isMinimax = (r: OmdRun): boolean => r.executor === 'mcode' || r.executor === 'minimax' || /minimax/i.test(r.model)
 
 const CRAB_SCALE = 1.1
 
@@ -737,7 +737,7 @@ const omdMeta = (r: OmdRun): string => {
 // `74 tools · bash: npx tsc · 5.6M tokens · 10:31`
 const omdStats = (r: OmdRun, at: number, withTool = true): string =>
   [
-    `${r.toolCalls} ${tr().toolsWord}`,
+    r.toolCalls ? `${r.toolCalls} ${tr().toolsWord}` : '',
     withTool && r.status === 'running' ? r.lastTool : '',
     r.tokens ? `${fmtTokens(r.tokens)} ${tr().tokensWord}` : '',
     fmtTime(omdElapsed(r, at)),
@@ -853,17 +853,38 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   void $.ui.open({ id: PANE, title: tr().pane })
 }
 
-let sessionId = ''
 let isScanning = false
 
-// One run of bin/omd-scan.mjs; the atom changes only when what it reports does.
+// delegate's C-0 run (`$.delegate.runs()`: this session's runs) in the shape the panel draws. What C-0 does not carry is
+// left out: the tool-call count, the executor's last message, the gate phase (a running run reads as `exec`).
+// The type comes from the delegate contract the engine lays beside this mod (`dependencies` in plugin.json), never copied.
+type DelegateRun = Awaited<ReturnType<EngineInterface['delegate']['runs']>>[number]
+const fromDelegate = (r: DelegateRun): OmdRun => ({
+  id: `omd:${r.label}`,
+  label: r.label,
+  executor: r.executor,
+  spec: '',
+  model: r.model ?? (r.executor === 'mcode' ? 'MiniMax' : r.executor),
+  status: r.state === 'running' ? 'running' : r.state === 'pass' ? 'done' : 'failed',
+  phase: r.state === 'running' ? 'exec' : 'end',
+  note: r.state === 'pass' ? '' : r.state === 'interrupted' ? 'interrupted' : r.stuck ?? r.failureClass ?? (r.outside?.length ? `outside ${r.outside.length}` : ''),
+  round: r.round ?? 1,
+  maxRounds: r.maxRounds ?? 3,
+  toolCalls: 0,
+  lastTool: r.state === 'running' ? r.tool ?? '' : '',
+  message: '',
+  tokens: r.tokens ?? 0,
+  contextTokens: 0,
+  startedAt: r.startedAt,
+  ...(r.state === 'running' ? {} : { endedAt: r.endedAt ?? Math.max(r.startedAt, 0) }),
+})
+
+// One read of `$.delegate.runs()`; the atom changes only when what it reports does.
 async function scanOmd($: EngineInterface): Promise<void> {
-  if (isScanning || !sessionId) return
+  if (isScanning) return
   isScanning = true
   try {
-    const out = await $.process.run(['node', `${$.plugin.root}/bin/omd-scan.mjs`, sessionId], { timeoutMs: 15000 })
-    if (out.exitCode !== 0) return
-    const runs = JSON.parse(out.stdout || '[]') as OmdRun[]
+    const runs = (await $.delegate.runs()).map(fromDelegate)
     const prev = await read($, omd)
     if (JSON.stringify(prev) === JSON.stringify(runs)) return
     await update($, omd, () => runs)
@@ -873,7 +894,7 @@ async function scanOmd($: EngineInterface): Promise<void> {
     const fresh = runs.find(r => r.status === 'running' && !prev.some(p => p.id === r.id))
     if (fresh) await autoOpen($, fresh.id)
   } catch {
-    // A run dir mid-write or node missing: the next poll tries again.
+    // delegate not loaded (no `$.delegate`), or a scan in flight failed: the next poll tries again.
   } finally {
     isScanning = false
   }
@@ -947,7 +968,6 @@ export const register: Register = (on, options) => {
     })
 
     // omd-lite runs this session launched: every 2 s while one runs, every 10 s otherwise.
-    sessionId = await $.session.id()
     let ticks = 0
     $.clock.every(2000, () => {
       ticks += 1

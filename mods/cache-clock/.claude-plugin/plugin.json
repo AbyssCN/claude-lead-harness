@@ -1,0 +1,6 @@
+{
+  "name": "cache-clock",
+  "version": "0.4.0",
+  "description": "缓存钟:每次回复后在输入框上方倒数到 prompt cache 变冷,标出现在回复与冷了重写各要多少钱;冷了先拦一次人发的消息并报价,大会话给「交接」按钮(填入 /relay go);保温只在按按钮或 /keepwarm 时发。取代 cache-tax,底子是 benai cache-clock",
+  "types": "./types/index.d.ts"
+}

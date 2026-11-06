@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# 用法: send-to-ticket <单号> <文本>
+# herdr agent prompt 发出后确认输入框已提交;没提交就回车重试,共 3 次仍卡住 → ticket report 报 lead 并退 1。
+# 环境: HERDR_BIN / TICKET_BIN(测试替身) · SEND_SETTLE(每次发出后等几秒再看,默认 2)
+set -u
+[ $# -ge 2 ] || { echo "用法: send-to-ticket <单号> <文本>" >&2; exit 2; }
+t=$1; text=$2
+herdr=${HERDR_BIN:-herdr}; ticket=${TICKET_BIN:-ticket}; settle=${SEND_SETTLE:-2}
+
+# 输入框 = 最后一对分隔线之间。里面还有这段文本的开头(或「Pasted text」折叠占位)就是没提交。
+stuck() {
+  local snip pane box
+  snip=$(printf '%s' "$text" | head -n1 | tr -d '[:space:]' | cut -c1-12)
+  pane=$("$herdr" agent read "$t" --source visible --lines 14 2>/dev/null) || return 1
+  box=$(printf '%s\n' "$pane" | awk '/^─{5,}/{n++; if(n>1){last=buf}; buf=""; next} {buf=buf $0 "\n"} END{printf "%s", last}')
+  [ -n "$box" ] || box=$(printf '%s\n' "$pane" | tail -n 4)
+  printf '%s' "$box" | grep -q 'Pasted text' && return 0
+  [ -n "$snip" ] && printf '%s' "$box" | tr -d '[:space:]' | grep -qF -- "$snip"
+}
+
+"$herdr" agent prompt "$t" "$text" >/dev/null || { echo "send-to-ticket: herdr agent prompt 失败($t)" >&2; exit 1; }
+for try in 1 2 3; do
+  sleep "$settle"
+  stuck || { [ "$try" = 1 ] || echo "send-to-ticket: 第 $try 次确认已提交($t)" >&2; exit 0; }
+  echo "send-to-ticket: $t 输入框没提交,回车重试 $try/3" >&2
+  "$herdr" agent send-keys "$t" enter >/dev/null
+done
+sleep "$settle"
+stuck || exit 0
+"$ticket" report "$t" --status needs-lead --summary "send-to-ticket: 提示发给 $t 后回车 3 次输入框仍没提交,请 lead 看一眼窗格" >/dev/null 2>&1
+echo "send-to-ticket: $t 3 次重试仍卡住,已 ticket report 报 lead" >&2
+exit 1

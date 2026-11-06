@@ -1,0 +1,24 @@
+--- a/omdl-merge.sh
++++ b/omdl-merge.sh
+@@ -2,7 +2,13 @@
+ # 收一片 MiniMax:删引擎临时文件、还原无关 png、以 MiniMax 名义提交未提交的改动,--no-ff 合入当前分支(默认主目录 main;INTO=<worktree> 改合入目标)。用法: WAVE=W4 scripts/dev/omdl-merge.sh <name> "<提交说明>"(WAVE 写进合并说明)。合并前先读 diff 与 ~/.omd-lite/runs/<name>/mcode-round-*.last.md。
+ # 用法(旧名): w1-merge.sh <run name> "<commit msg>"  —— 提交 run worktree 的改动(显式路径)并 --no-ff 合入 main
+ set -euo pipefail
+-n=$1; msg=$2; wt=/home/user/repos/omdl-$n
++n=$1; msg=$2; wt=/home/user/repos/omdl-$n; br=omdl/$n
++# 续跑的 run(<原>-r2,omd-lite/piw run --reuse-worktree)用的是原 worktree 与原分支:以它的 meta.json 为准
++meta=$HOME/.omd-lite/runs/$n/meta.json
++if [ -f "$meta" ]; then
++  read -r mwt mbr < <(node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((m.resumedFrom&&m.worktree||"")+" "+(m.resumedFrom&&m.branch||""))' "$meta")
++  [ -n "${mwt:-}" ] && wt=$mwt; [ -n "${mbr:-}" ] && br=$mbr
++fi
+ cd $wt
+ rm -f .omd-leaf-payload-*.json
+ { git status --short | rg '^ M .*\.png$' | awk '{print $2}' | xargs -r git checkout --; } || true
+@@ -11,5 +17,5 @@
+ 
+ 执行者:MiniMax(mcode,omd-lite run $n);lead 读 diff 验收后提交。"
+ cd "${INTO:-/home/user/repos/myapp}"   # 10.9:INTO=/home/user/repos/myapp-109 REL=10.9 合进 int/10.9
+-git merge --no-ff -q omdl/$n -m "merge(${REL:-10.8} ${WAVE:-} · $n): ${msg%%$'\n'*}"
++git merge --no-ff -q $br -m "merge(${REL:-10.8} ${WAVE:-} · $n): ${msg%%$'\n'*}"
+ git log -1 --oneline

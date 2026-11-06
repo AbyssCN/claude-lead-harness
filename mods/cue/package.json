@@ -1,0 +1,6 @@
+{
+  "name": "claude-code",
+  "private": true,
+  "type": "module",
+  "exports": { "./testing": "./test/node-kit.mjs" }
+}

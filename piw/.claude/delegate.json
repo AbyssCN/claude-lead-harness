@@ -1,0 +1,10 @@
+{
+  "sliceGate": "bash -c 'node --test test/*.test.mjs && echo \"gate-slice: PASS\" || { echo \"gate-slice: FAIL\"; exit 1; }' gate-slice",
+  "factory": {
+    "sandbox": {
+      "gateLockPath": "/tmp/myapp-vitest.lock",
+      "untrustedEnvVar": "MYAPP_UNTRUSTED_AGENT",
+      "envPassPrefixes": "MYAPP_[A-Z_]+"
+    }
+  }
+}

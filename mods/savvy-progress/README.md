@@ -1,52 +1,46 @@
-# savvy-progress (fork)
+> **已并入 board(2026-10-23)**:任务条、helper 卡、像素造型和计划工具都由 board 侧栏接管，计划工具改名 `mcp__board__plan`。本目录已从 marketplace 下架，不再维护。契约见 `docs/plan/2026-10-23-board-unified.md`。
 
-Progress bar above the prompt plus a live agents panel for Claude Code subagents, extended to also track omd-lite executor runs.
+# savvy-progress (owner-mods fork)
 
-> **Forked from [johnnyvizz/claude-kit](https://github.com/johnnyvizz/claude-kit) `plugins/savvy-progress` 1.2.0 (MIT, see `LICENSE`).**
-> Changes in this fork:
-> - 跟踪本会话启动的 omd-lite run(`bin/omd-scan.mjs` + 提示框下方的 band + 面板里的 `omd-lite` 一节);
-> - MiniMax 执行器的像素形象(桌面端 SVG,终端半块字符);
-> - 中文界面(`language: zh`);
-> - runs 目录可用环境变量 `OMD_LITE_RUNS_DIR` 覆盖。
->
-> 保留原名,所以 savvy-flow 的工具名照样对得上。
+Fork of [johnnyvizz/claude-kit](https://github.com/johnnyvizz/claude-kit) `plugins/savvy-progress` 1.2.0 (MIT, see `LICENSE`).
+The fork keeps the name, so savvy-flow's tool names still match, and adds **omd-lite runs** and a Chinese UI (`language: zh`).
 
-## 功能(上游)
+## omd-lite runs (fork)
 
-- **进度条**:flow 标题、阶段、已验收 / 计划任务数,以及打开面板的按钮。有东西上报进度(savvy-flow 会)或 `savvy-*` worker 启动后出现。
-- **Agents 面板**(`/agents-info` 开关):运行中、已结束、计划中的子 agent,含模型、effort、任务进度、上下文、估算花费与耗时。`prefers-reduced-motion` 时停动画。
-- 新增工具:
-  - `mcp__savvy-progress__progress`:编排者上报计划、阶段、已验收任务;
-  - `mcp__savvy-progress__step`:worker 上报自己的步骤(`done` / `total` / `note`)。
+savvy-progress only sees Claude Code's own subagents. This fork also tracks executors that
+[omd-lite](../../omd-lite) starts outside Claude Code (`mcode`, `claude -p`, `pi`), **only runs launched from this session**:
+savvy-progress has no scanner of its own: it reads `$.delegate.runs()` (this session and its /clear lineage) from the
+[delegate](../delegate) mod, which it lists under `dependencies` in `.claude-plugin/plugin.json`. Keep delegate enabled;
+without it the omd-lite section is empty and everything else still works. Runs started elsewhere do not show.
 
-花费是按 token 数和内置价格表(`hooks/register.tsx` 的 `PRICES`)的粗估,不是账单。
+- **Band** under the prompt: the run, round `n/max`, executing or at the gates, tool calls, the tool in flight, tokens, time.
+  It stays ten minutes after the last run ends; ✕ hides it; `×N` opens the panel.
+- **Panel** (`/agents-info`): an `omd-lite` section, one row per run, with its result (`stuck-gate`, a failed gate, `interrupted`).
+- **MiniMax** (mcode or a MiniMax model) is a peach pixel blob with the logo's waveform as its crest; the bars pump while it works.
+  On the desktop it is SVG; in the terminal, half blocks.
 
-## omd-lite runs(本 fork)
+Tests: `claude plugin test .` (band and panel). The scanner and its tests live in delegate (`node --test delegate/bin/scan.test.mjs`).
 
-savvy-progress 本来只看得到 Claude Code 自己的子 agent。本 fork 还跟踪 omd-lite 在 Claude Code 之外启动的执行器(`mcode`、`claude -p`、`pi`),**只看本会话启动的 run**:omd-lite 把 `claude_session`(取自 `CLAUDE_CODE_SESSION_ID`)和 `driver_pid` 写进 `<runs>/<label>/meta.json`,`bin/omd-scan.mjs <session-id>` 只读这些(纯读;有 run 在跑时每 2 秒,否则每 10 秒,以及提到 `omd-lite` 的 Bash 调用之后立即扫一次)。
+---
 
-- **Band**(提示框下方):run、轮次 `n/max`、执行中或在跑闸、工具调用数、当前工具、token、耗时。最后一个 run 结束后保留十分钟;✕ 隐藏;`×N` 打开面板。
-- **面板**:`omd-lite` 一节,每个 run 一行,带结果(`stuck-gate`、失败的闸、`interrupted`)。
+A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.
 
-没装 omd-lite 时这部分什么都不显示。
+- **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts.
+- **Agents panel** (`/agents-info` toggles it): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
 
-## 配置
+## Tools it adds
 
-- `language`:`auto`(默认)、`en`、`ru`、`zh`。`auto` 依次跟随 Claude Code 的 `language` 设置、系统 locale,最后回落英文。在 `/config` 设置,或手动加载时写进 `~/.claude/settings.json`:
+- `mcp__savvy-progress__progress`: the orchestrator reports the plan, phase and accepted tasks.
+- `mcp__savvy-progress__step`: a worker reports its own steps (`done`, `total`, `note`). A worker that does not report shows its context fill in grey instead.
 
-  ```json
-  { "pluginConfigs": { "savvy-progress": { "options": { "language": "zh" } } } }
-  ```
+Cost is a rough estimate from token counts and a built-in per-model price table (`PRICES` in `hooks/register.tsx`), not a bill.
 
-- 环境变量 `OMD_LITE_RUNS_DIR`:omd-lite runs 目录,默认 `$HOME/.omd-lite/runs`。
+## Settings
 
-## 测试
+`language`: `auto` (default), `en`, `ru` or `zh`. `auto` follows Claude Code's `language` setting, then the system locale, and falls back to English. Set it in `/config`, or, for a mod loaded by hand, in `~/.claude/settings.json`:
 
-`claude plugin test .`(band 和面板)与 `node --test bin/omd-scan.spec.mjs`(扫描器)。
-
-## 安装
-
+```json
+{ "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
-/plugin marketplace add AbyssCN/claude-lead-harness
-/plugin install savvy-progress@claude-lead-harness
-```
+
+Install instructions are in the [repository README](../../README.md).

@@ -16,9 +16,33 @@ export type PaneModel = {
   roadmap: PaneTally[]
 }
 
-// The sidebar's model (the current repo's board), refreshed on open, each turn and every minute.
+// A helper card: a subagent or a delegate run, as board/hooks/helpers.ts maps it.
+export type PaneHelper = {
+  id: string
+  label: string
+  costume: 'other' | 'fable' | 'heavy' | 'careful' | 'medium' | 'light' | 'explore' | 'minimax'
+  phase: 'working' | 'done' | 'failed'
+  step: string
+  tokens: number | null
+  startedAt: number
+  round?: number
+  maxRounds?: number
+}
+// The task bar: the plan as drawn, `shown` false once a finished plan has lingered.
+export type PaneBand = { title: string; steps: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>; shown: boolean }
+
+// The sidebar's model (the current repo's board), refreshed on open, each turn and every minute;
+// helpers, the band and the 500ms clock (`tick`, `now`) move on their own.
 declare module 'claude-code' {
   interface PluginState {
-    board: { model: PaneModel | null; at: number; open: Record<string, boolean> }
+    board: {
+      model: PaneModel | null
+      at: number
+      open: Record<string, boolean>
+      helpers: PaneHelper[]
+      band: PaneBand | null
+      clk: { tick: number; now: number }
+      fold: boolean
+    }
   }
 }

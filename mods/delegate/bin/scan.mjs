@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // omd-lite runs launched from one Claude Code session, as delegate reads them.
-// Usage: scan.mjs <claude-session-id> [runs-dir]
+// Usage: scan.mjs <claude-session-id[,older-id...]> [runs-dir]
+//        scan.mjs --all [runs-dir]        every session's runs (G-5, behind $.delegate.allRuns)
+//        scan.mjs --orphans [runs-dir]    dead drivers with no result (G-3)
 // Prints a JSON array of ScanRun: the C-0 DelegateRun fields (types/index.d.ts) plus what the
 // launch guard and the wake text need (repo, worktree, spec, allowed, diffstat, gateTail, ...).
 // Pure read: never writes into the runs dir. Only node's standard library.
@@ -8,6 +10,15 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+// G-7: the names the runner answers to (hooks/logic.ts RUN_NAMES is the mod's copy). `piw` is the runner's new name; the old
+// one, omd-lite, stays a symlink to it. DELEGATE_CLI_NAMES (comma-separated) overrides the CLI names, the runs-dir argument
+// overrides the directory.
+export const NAMES = {
+  cliNames: (process.env.DELEGATE_CLI_NAMES || 'piw,omd-lite').split(',').map(x => x.trim()).filter(Boolean),
+  runsDir: path.join('.omd-lite', 'runs'),
+}
+const defaultRunsDir = () => path.join(os.homedir(), NAMES.runsDir)
 
 // A run dir untouched this long is not one of this session's live runs.
 const RECENT_MS = 2 * 24 * 3600 * 1000
@@ -47,8 +58,18 @@ function tailLines(file, n = 262144) {
   }
 }
 
-// The driver is alive and still omd-lite (a reused pid is someone else).
-export function isAlive(pid) {
+const escapeRe = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// Does this /proc cmdline (NUL-separated argv) belong to the runner under any of its names? A word that IS the name or ends
+// in /<name>: `node /home/user/repos/piw/bin/piw run ...`, `node .../omd-lite run ...`. A path that merely passes through a
+// directory of that name (`.../repos/piw/lib/x.js`) is not it.
+export function isRunnerCmdline(cmdline, names = NAMES.cliNames) {
+  const re = new RegExp(`(?:^|[/\\0\\s])(?:${names.map(escapeRe).join('|')})(?:[\\0\\s]|$)`)
+  return re.test(cmdline)
+}
+
+// The driver is alive and still the runner (a reused pid is someone else). `procRoot` is for tests (a /proc fixture).
+export function isAlive(pid, { names = NAMES.cliNames, procRoot = '/proc' } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
@@ -56,7 +77,7 @@ export function isAlive(pid) {
     if (err.code !== 'EPERM') return false
   }
   try {
-    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('omd-lite')
+    return isRunnerCmdline(fs.readFileSync(`${procRoot}/${pid}/cmdline`, 'utf8'), names)
   } catch {
     return true // no /proc (macOS): trust the signal check
   }
@@ -118,12 +139,16 @@ export function parseClaude(lines) {
   return out
 }
 
-// pi --mode json: the tool in flight and the last agent_end's stopReason / errorMessage.
+// pi --mode json: the tool in flight, tokens and dollars (each assistant message_end's usage), and the last agent_end's stopReason / errorMessage.
 export function parsePi(lines) {
-  const out = { lastTool: '', model: '', stopReason: '', error: '' }
+  const out = { lastTool: '', tokens: 0, cost: 0, model: '', stopReason: '', error: '' }
   for (const e of lines.map(parseLine)) {
     if (!e) continue
-    if (e.type === 'tool_execution_start') out.lastTool = [e.toolName, brief(e.args)].filter(Boolean).join(': ')
+    if (e.type === 'message_end' && e.message?.role === 'assistant') {
+      out.tokens += e.message.usage?.totalTokens || 0
+      out.cost += e.message.usage?.cost?.total || 0
+    }
+    else if (e.type === 'tool_execution_start') out.lastTool = [e.toolName, brief(e.args)].filter(Boolean).join(': ')
     else if (e.type === 'agent_end') {
       const m = e.messages?.at?.(-1)
       out.stopReason = m?.stopReason ?? ''
@@ -132,6 +157,34 @@ export function parsePi(lines) {
     }
   }
   return out
+}
+
+// A pi.jsonl runs to tens of MB and a scan is a fresh process every 2 s: the sums are kept beside it, in
+// ~/.cache/delegate-scan, and only the bytes written since the last scan are read.
+export function piUsage(file, key, cacheDir = path.join(os.homedir(), '.cache', 'delegate-scan')) {
+  const cacheFile = path.join(cacheDir, `${key}.json`)
+  let c = { size: 0, tokens: 0, cost: 0 }
+  try {
+    const j = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
+    // A sum written before dollars were counted starts over, or the cost would miss the bytes it covered.
+    if ('cost' in j) c = j
+  } catch {}
+  let size = 0
+  try { size = fs.statSync(file).size } catch { return { tokens: 0, cost: 0 } }
+  if (size < c.size) c = { size: 0, tokens: 0, cost: 0 }
+  if (size === c.size) return { tokens: c.tokens, cost: c.cost }
+  const buf = Buffer.alloc(size - c.size)
+  const fd = fs.openSync(file, 'r')
+  fs.readSync(fd, buf, 0, buf.length, c.size)
+  fs.closeSync(fd)
+  const end = buf.lastIndexOf(10) + 1
+  const usage = parsePi(buf.subarray(0, end).toString('utf8').split('\n').filter(l => l.startsWith('{"type":"message_end"')))
+  c = { size: c.size + end, tokens: c.tokens + usage.tokens, cost: c.cost + usage.cost }
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true })
+    fs.writeFileSync(cacheFile, JSON.stringify(c))
+  } catch {}
+  return { tokens: c.tokens, cost: c.cost }
 }
 
 // The 允许改动 line of a brief (C-1b) → paths; null when the brief has none.
@@ -179,6 +232,41 @@ function failureOf(result, exec, state) {
   return result.gates === 'not-run' ? 'not-run' : 'unknown'
 }
 
+// What it takes to start a run again from its meta.json: the orphans list (G-3) and the provider-failure redispatch (G-4) share it.
+function launchInfo(meta) {
+  return {
+    repo: meta.repo ?? '',
+    base: meta.base_sha || meta.base || '',
+    worktree: meta.worktree ?? '',
+    branch: meta.branch ?? '',
+    spec: meta.spec ?? '',
+    prompt: meta.prompt_arm ?? 'omd-leaf',
+    gates: Array.isArray(meta.gates) ? meta.gates : [],
+    ...(meta.max_rounds ? { maxRounds: meta.max_rounds } : {}),
+    ...(meta.role ? { role: meta.role } : {}),
+    ...(meta.executor ? { executor: meta.executor } : {}),
+    ...(meta.model && meta.model !== 'default' ? { model: meta.model } : {}),
+    context: meta.context !== false,
+    ...(meta.claude_session ? { claudeSession: meta.claude_session } : {}),
+  }
+}
+
+// G-4: piw writes `failureClass` (quota|auth|stream|request|gate|null) and `failedCoords` to meta.json and result.json when a
+// run ends. Read from there, never from stderr. Only the two classes a different provider can cure carry a launch recipe.
+const REDISPATCHABLE = new Set(['quota', 'stream'])
+
+// piw's own failure record, kept apart from `failureClass` above (that one is C-0's, read by relay and the wake).
+function piwFailure(meta, result, isEnded) {
+  const cls = meta.failureClass ?? result?.failureClass
+  const coords = meta.failedCoords ?? result?.failedCoords
+  return {
+    ...(meta.claude_session ? { claudeSession: meta.claude_session } : {}),
+    ...(isEnded && typeof cls === 'string' ? { piwFailure: cls } : {}),
+    ...(isEnded && Array.isArray(coords) && coords.length ? { failedCoords: coords.filter(c => typeof c === 'string') } : {}),
+    ...(isEnded && REDISPATCHABLE.has(cls) ? { launch: launchInfo(meta) } : {}),
+  }
+}
+
 export function summarise(dir, meta, now = Date.now()) {
   const files = fs.readdirSync(dir)
   const executor = executorOf(meta, files)
@@ -188,9 +276,16 @@ export function summarise(dir, meta, now = Date.now()) {
   const round = Math.max(1, ...execRounds, ...gateRounds.map(n => (kind === 'pi' ? n + 1 : n)))
   let exec
   let tokens = 0
+  let cost = 0
   if (kind === 'pi') {
     const fb = path.join(dir, 'fallback', 'pi.jsonl')
-    exec = parsePi(tailLines(fs.existsSync(fb) ? fb : path.join(dir, 'pi.jsonl')))
+    const file = fs.existsSync(fb) ? fb : path.join(dir, 'pi.jsonl')
+    exec = parsePi(tailLines(file))
+    // A run that fell back to another provider spent the main log's tokens too.
+    const main = piUsage(path.join(dir, 'pi.jsonl'), path.basename(dir))
+    const back = fs.existsSync(fb) ? piUsage(fb, `${path.basename(dir)}.fallback`) : { tokens: 0, cost: 0 }
+    tokens = main.tokens + back.tokens
+    cost = main.cost + back.cost
   } else {
     const parse = kind === 'claude' ? parseClaude : parseMcode
     exec = parse([])
@@ -202,6 +297,7 @@ export function summarise(dir, meta, now = Date.now()) {
   }
   const metaTokens = meta.tokens ? (meta.tokens.input || 0) + (meta.tokens.output || 0) + (meta.tokens.cacheRead || 0) : 0
   tokens = Math.max(tokens, metaTokens)
+  cost = Math.max(cost, meta.tokens?.cost || 0)
 
   const result = readJson(path.join(dir, 'result.json'))
   const isEnded = meta.wall_seconds !== undefined && meta.wall_seconds !== null
@@ -241,6 +337,7 @@ export function summarise(dir, meta, now = Date.now()) {
     ...(failureOf(result, exec, state) ? { failureClass: failureOf(result, exec, state) } : {}),
     ...(state === 'running' && exec.lastTool ? { tool: exec.lastTool } : {}),
     ...(tokens ? { tokens } : {}),
+    ...(cost > 0 ? { costUsd: cost } : {}),
     // Beyond C-0: for the launch guard, the wake text and the merge clean-up.
     repo: meta.repo ?? '',
     worktree: meta.worktree ?? '',
@@ -251,12 +348,13 @@ export function summarise(dir, meta, now = Date.now()) {
     gateTail: gateLog.slice(-GATE_TAIL),
     failedGate: result?.failed_gate ?? '',
     error: exec.error || result?.error || '',
+    ...piwFailure(meta, result, isEnded),
   }
   return run
 }
 
-export function scan(sessionId, runsDir = path.join(os.homedir(), '.omd-lite', 'runs'), now = Date.now()) {
-  if (!sessionId) return []
+// Run dirs touched in the last two days, each summarised when `keep(meta)` says so; oldest first.
+function collect(runsDir, now, keep) {
   let labels
   try {
     labels = fs.readdirSync(runsDir)
@@ -274,7 +372,7 @@ export function scan(sessionId, runsDir = path.join(os.homedir(), '.omd-lite', '
     }
     if (!st.isDirectory() || now - st.mtimeMs > RECENT_MS) continue
     const meta = readJson(path.join(dir, 'meta.json'))
-    if (!meta || meta.claude_session !== sessionId) continue
+    if (!meta || !keep(meta)) continue
     try {
       runs.push(summarise(dir, meta, now))
     } catch {
@@ -284,6 +382,59 @@ export function scan(sessionId, runsDir = path.join(os.homedir(), '.omd-lite', '
   return runs.sort((a, b) => a.startedAt - b.startedAt)
 }
 
+// `sessionIds`: one id, a comma-separated list, or an array. A /clear gives the conversation a new
+// session id (G-1), and runs launched before it still carry the old one, so the caller passes the lineage.
+export function scan(sessionIds, runsDir = defaultRunsDir(), now = Date.now()) {
+  const ids = new Set((Array.isArray(sessionIds) ? sessionIds : String(sessionIds ?? '').split(',')).map(s => String(s).trim()).filter(Boolean))
+  if (!ids.size) return []
+  return collect(runsDir, now, meta => ids.has(meta.claude_session))
+}
+
+// G-5: the same summaries without the session filter: every session's runs, and the ones omdl-queue.sh / slot-run.sh
+// start, which carry no `claude_session` at all. Behind `$.delegate.allRuns()`; `scan` above stays this session's.
+export function scanAll(runsDir = defaultRunsDir(), now = Date.now()) {
+  return collect(runsDir, now, () => true)
+}
+
+// G-3: runs whose driver died with no result.json and whose worktree is still there, from any session (a WSL
+// restart kills the driver mid-run: 9 of 13 in 7 days). Not already resumed: no other run names it in `resumedFrom`,
+// and no `<label>-rN` dir exists.
+const ORPHAN_WINDOW_MS = 7 * 24 * 3600 * 1000
+export function scanOrphans(runsDir = defaultRunsDir(), now = Date.now()) {
+  let labels
+  try {
+    labels = fs.readdirSync(runsDir)
+  } catch {
+    return []
+  }
+  const metas = new Map()
+  for (const label of labels) {
+    const dir = path.join(runsDir, label)
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue
+    } catch {
+      continue
+    }
+    const meta = readJson(path.join(dir, 'meta.json'))
+    if (meta) metas.set(label, { meta, dir })
+  }
+  const resumed = new Set([...metas.values()].map(m => m.meta.resumedFrom).filter(Boolean))
+  const out = []
+  for (const [label, { meta, dir }] of metas) {
+    const startedAt = (meta.start_epoch ?? 0) * 1000 || fs.statSync(path.join(dir, 'meta.json')).mtimeMs
+    if (now - startedAt > ORPHAN_WINDOW_MS) continue
+    if (meta.wall_seconds !== undefined && meta.wall_seconds !== null) continue
+    if (fs.existsSync(path.join(dir, 'result.json'))) continue
+    if (!Number.isInteger(meta.driver_pid) || isAlive(meta.driver_pid)) continue
+    if (!meta.worktree || !fs.existsSync(meta.worktree)) continue
+    if (resumed.has(label) || labels.some(l => l.startsWith(`${label}-r`) && /^\d+$/.test(l.slice(label.length + 2)))) continue
+    out.push({ label, ...launchInfo(meta), startedAt })
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt)
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.stdout.write(JSON.stringify(scan(process.argv[2], process.argv[3])))
+  const out =
+    process.argv[2] === '--orphans' ? scanOrphans(process.argv[3]) : process.argv[2] === '--all' ? scanAll(process.argv[3]) : scan(process.argv[2], process.argv[3])
+  process.stdout.write(JSON.stringify(out))
 }
